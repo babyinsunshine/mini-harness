@@ -34,7 +34,18 @@ uv run mini-harness --resume SESSION_ID
 
 终端启动时显示会话 ID。恢复时沿用已保存的模型名、endpoint、上下文预算、
 env_file 路径等设置，显式传入的新参数优先。`--cwd` 默认当前目录；已有会话保留
-自己的工作目录。尚未提供真实 API 凭据，自动化验证使用离线模型驱动真实 graph。
+自己的工作目录。日常自动化验证使用离线模型驱动真实 graph；另外已完成 DeepSeek
+真实 API 的工具调用、会话恢复和手动压缩验证。
+
+本次通过的 DeepSeek 配置：
+
+```bash
+uv sync --extra openai
+export OPENAI_API_KEY='你的 DeepSeek API 密钥'
+uv run mini-harness --model 'openai:deepseek-flash' --base-url 'https://api.deepseek.com'
+```
+
+验证范围和结果见 [DeepSeek 实测记录](docs/validation/2026-10-17-deepseek.md)。
 
 ## 工具与执行
 
@@ -143,7 +154,7 @@ uv run mini-harness --help
 
 测试使用真实临时文件、Bash 进程、SQLite 和 LangGraph，只替换外部模型调用。
 另有本地 HTTP/SSE 测试，通过真实 OpenAI 适配器验证 CLI 工具调用、流输出和会话恢复。
-真实供应商 API 仍需配置凭据后做一次端到端验证。
+真实 API 已验证上述 DeepSeek 配置；其他供应商仍需分别验证。
 
 详细设计与实施记录见 [spec](docs/superpowers/specs/2026-10-17-harness.md)
 和 [plan](docs/superpowers/plans/2026-10-17-bootstrap.md)。

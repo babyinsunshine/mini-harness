@@ -95,3 +95,11 @@ long-term memory still require their module design discussion. No deferred minor
 Ruling: a separate runtime SQLite file is preferable to making all metadata operations async;
 the cost is one extra local database file and a changed first-release storage layout.
 Work stays on the local development branch; there is no parent project branch or remote to merge.
+
+## Follow-up: authorized live API check
+
+After the user supplied a DeepSeek credential, the original CLI passed real DeepSeek requests
+for all four basic tools and session resume. Real summary generation and post-compaction resume
+also passed. No production code change was required. See
+`docs/validation/2026-10-17-deepseek.md` for exact scope, configuration and observed results.
+The credential was not persisted to the repository, session databases, logs or report.
