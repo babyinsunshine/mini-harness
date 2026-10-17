@@ -64,12 +64,14 @@ DEFAULTS = {
 def resolve_settings(args, directory):
     saved = {}
     if args.resume:
-        with sqlite3.connect(directory / "state.sqlite") as connection:
+        with sqlite3.connect(directory / "runtime.sqlite") as connection:
             row = connection.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
             saved = json.loads(row[0]) if row else {}
     for key, default in DEFAULTS.items():
         if getattr(args, key) is None:
             setattr(args, key, saved.get(key, default))
+    if args.env_file is not None:
+        args.env_file = Path(args.env_file).expanduser().resolve()
 
 
 def sessions(directory):

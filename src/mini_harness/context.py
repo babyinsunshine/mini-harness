@@ -142,18 +142,28 @@ class ContextMiddleware(AgentMiddleware):
     async def _summary(self, messages, instructions="", notes=False):
         groups = rounds(messages)
         prompt = (NOTES_PROMPT if notes else SUMMARY_PROMPT) + "\n" + instructions
-        for attempt in range(3):
-            request = [
-                SystemMessage(content=prompt),
-                HumanMessage(content=conversation_text(flatten(groups))),
-            ]
-            if estimate_tokens(request) + self.policy.reserve >= self.policy.window:
-                if len(groups) <= 1:
-                    raise ValueError(
-                        "Single message exceeds summary input budget; inspect transcript"
+        summary, batch_size, calls = "", len(groups), 0
+        while groups:
+            count = min(batch_size, len(groups))
+            request = [SystemMessage(content=prompt)]
+            if summary:
+                request.append(
+                    HumanMessage(
+                        content="Previous summary covers earlier messages. Merge with the "
+                        "following messages, preserving requirements and decisions:\n" + summary
                     )
-                groups.pop(0)
+                )
+            request.append(HumanMessage(content=conversation_text(flatten(groups[:count]))))
+            if estimate_tokens(request) + self.policy.reserve >= self.policy.window:
+                if count == 1:
+                    raise ValueError(
+                        "Single round exceeds summary input budget; inspect transcript"
+                    )
+                batch_size = max(1, count // 2)
                 continue
+            calls += 1
+            if calls > 32:
+                raise ValueError("Summary call budget exhausted; original context retained")
             try:
                 response = await self.model.ainvoke(
                     request,
@@ -161,9 +171,9 @@ class ContextMiddleware(AgentMiddleware):
                     config={"tags": ["nostream"]},
                 )
             except Exception as error:
-                if not overflow_error(error) or attempt == 2 or len(groups) <= 1:
+                if not overflow_error(error) or count == 1:
                     raise
-                groups.pop(0)
+                batch_size = max(1, count // 2)
                 continue
             if response.tool_calls:
                 raise ValueError("Summarizer returned tool calls instead of text")
@@ -173,8 +183,11 @@ class ContextMiddleware(AgentMiddleware):
                 text = match.group(1).strip()
             if not text:
                 raise ValueError("Summarizer returned an empty summary")
-            return text
-        raise ValueError("Could not fit summary input within budget")
+            summary = text
+            groups = groups[count:]
+        if not summary:
+            raise ValueError("No messages to summarize")
+        return summary
 
     async def compact(self, messages, instructions="", start=None, end=None, *, force=False):
         for message in messages:

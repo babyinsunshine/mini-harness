@@ -17,13 +17,15 @@ class Session:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.id = self.directory.name
         self.database = self.directory / "state.sqlite"
+        self.runtime_database = self.directory / "runtime.sqlite"
         self._lock = self.database.open("a+b")
         try:
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             self._lock.close()
             raise RuntimeError(f"Session {self.id} is already open") from None
-        self.connection = sqlite3.connect(self.database)
+        # Async checkpoint transactions must not contend with synchronous runtime writes.
+        self.connection = sqlite3.connect(self.runtime_database)
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute(
             "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)"

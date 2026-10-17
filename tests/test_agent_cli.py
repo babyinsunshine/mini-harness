@@ -186,3 +186,12 @@ def test_resume_restores_model_window_and_env_file_with_explicit_overrides(tmp_p
     assert args.output_reserve == 4096
     assert str(args.env_file) == "/tmp/saved-env.sh"
     assert args.notes is True
+
+
+def test_env_file_path_is_saved_independently_of_future_launch_directory(tmp_path, monkeypatch):
+    from mini_harness.cli import parser, resolve_settings
+
+    monkeypatch.chdir(tmp_path)
+    args = parser().parse_args(["--env-file", "env.sh"])
+    resolve_settings(args, tmp_path / "new-session")
+    assert args.env_file == tmp_path / "env.sh"

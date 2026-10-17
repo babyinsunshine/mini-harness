@@ -18,6 +18,7 @@ class ProcessTask:
     cwd_file: Path
     command: str
     watcher: asyncio.Task | None = None
+    cleanup: asyncio.Task | None = None
     background: bool = False
     notified: bool = False
     reason: str | None = None
@@ -103,6 +104,8 @@ class ProcessManager:
             task.reason = "runtime_limit"
             await self._terminate(task)
         finally:
+            # A shell can exit while background children keep its process group alive.
+            await self._terminate(task)
             if task.process.stdin:
                 task.process.stdin.close()
             if task.background:
@@ -147,8 +150,13 @@ class ProcessManager:
         return self.describe(task)
 
     async def _terminate(self, task: ProcessTask):
-        if task.process.returncode is not None:
-            return
+        # Clean a group exactly once, while its ownership is current. A completed
+        # task must not later signal an unrelated process group after PID reuse.
+        if task.cleanup is None:
+            task.cleanup = asyncio.create_task(self._kill_group(task))
+        await asyncio.shield(task.cleanup)
+
+    async def _kill_group(self, task: ProcessTask):
         try:
             os.killpg(task.process.pid, signal.SIGTERM)
             await asyncio.sleep(0.1)

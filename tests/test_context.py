@@ -226,3 +226,68 @@ async def test_disabling_auto_keeps_manual_compact_available(tmp_path):
         assert not model.inputs
         await context.compact(messages)
         assert model.inputs
+
+
+@pytest.mark.parametrize("provider_overflow", [False, True])
+async def test_summary_never_claims_coverage_of_omitted_requirement(tmp_path, provider_overflow):
+    from mini_harness.context import ContextMiddleware
+
+    class LimitedModel(SummaryModel):
+        async def ainvoke(self, messages, **kwargs):
+            self.inputs.append(messages)
+            if provider_overflow and "NEVER REMOVE AUTH" in str(messages):
+                raise RuntimeError("prompt_too_long")
+            return AIMessage(content="continue tests")
+
+    with Session(tmp_path / "s", tmp_path) as session:
+        model = LimitedModel()
+        context = ContextMiddleware(
+            session,
+            model,
+            policy(
+                window=3000,
+                reserve=500,
+                auto_buffer=500,
+                block_buffer=100,
+                keep_rounds=0,
+            ),
+        )
+        messages = [
+            HumanMessage(
+                content="NEVER REMOVE AUTH\n" + "x" * (100 if provider_overflow else 9000), id="u1"
+            ),
+            AIMessage(content="Now add tests", id="a1"),
+        ]
+        with pytest.raises((ValueError, RuntimeError)):
+            await context.compact(messages)
+        assert session.get("context_generation", 0) == 0
+        assert "NEVER REMOVE AUTH" in messages[0].content
+
+
+async def test_provider_overflow_summarizes_each_round_instead_of_discarding_it(tmp_path):
+    from mini_harness.context import ContextMiddleware
+
+    class SmallWindowModel(SummaryModel):
+        async def ainvoke(self, messages, **kwargs):
+            self.inputs.append(messages)
+            text = str(messages[-1].content)
+            if "first-request" in text and "second-request" in text:
+                raise RuntimeError("prompt_too_long")
+            return AIMessage(
+                content="Preserved first requirement"
+                if "first-request" in text
+                else "Preserved both requirements"
+            )
+
+    with Session(tmp_path / "s", tmp_path) as session:
+        model = SmallWindowModel()
+        context = ContextMiddleware(session, model, policy(keep_rounds=0))
+        result = await context.compact(
+            [
+                HumanMessage(content="first-request: preserve auth", id="u1"),
+                HumanMessage(content="second-request: add tests", id="u2"),
+            ]
+        )
+        assert "Preserved both requirements" in result[0].content
+        assert any("first-request" in str(request) for request in model.inputs)
+        assert any("Preserved first requirement" in str(request) for request in model.inputs[1:])

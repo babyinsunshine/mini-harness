@@ -83,3 +83,20 @@ def test_partial_last_log_record_is_recovered_after_crash(tmp_path):
         json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()
     ]
     assert [record["id"] for record in records] == ["first", "second"]
+
+
+async def test_runtime_metadata_does_not_wait_on_checkpoint_transaction(tmp_path):
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    from mini_harness.session import Session
+
+    with Session(tmp_path / "s", tmp_path) as session:
+        session.connection.execute("PRAGMA busy_timeout=20")
+        async with AsyncSqliteSaver.from_conn_string(str(session.database)) as saver:
+            await saver.setup()
+            await saver.conn.execute("BEGIN IMMEDIATE")
+            try:
+                session.set("background_completion", {"status": "done"})
+            finally:
+                await saver.conn.rollback()
+        assert session.get("background_completion") == {"status": "done"}

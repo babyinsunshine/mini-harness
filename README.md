@@ -52,6 +52,7 @@ env_file 路径等设置，显式传入的新参数优先。`--cwd` 默认当前
   stdin 使用普通管道，可追加输入和发送 EOF；没有 PTY。
 - 后台完成通知在安全的模型调用点注入；空闲的交互 CLI 可以继续处理完成事件。
 - `--process-timeout` 控制命令最长运行时间，默认一小时。停止和正常退出会清理进程组。
+  shell 结束后也会清理遗留子进程；长服务使用 `run_in_background=True`。
 - 恢复后将原来的活动进程记录标为 interrupted，不会使用旧 PID。
 
 项目根目录的 `AGENTS.md` 会在模型调用前重新加载。
@@ -75,6 +76,8 @@ env_file 路径等设置，显式传入的新参数优先。`--cwd` 默认当前
 压缩后会按预算重新读取最近通过文件工具查看的文件范围；项目指令每次请求重新加载。
 原始历史不删除，摘要含有原始 transcript 路径。工具调用与对应结果始终整组保留。
 连续三次自动压缩失败后停止自动尝试；手动压缩成功会重置计数。
+摘要输入过大时按完整轮次分段生成并合并，覆盖全部输入；单轮无法容纳时安全失败，
+保留原上下文。不会静默删除未经总结的旧需求。
 
 ```text
 /compact                         手动压缩
@@ -100,12 +103,14 @@ Micro 是可移植的本地实现，不依赖 Anthropic 内部 cache_edits。
 
 ```text
 ~/.mini-harness/sessions/<session_id>/
-├── state.sqlite        # LangGraph checkpoints + 少量运行元数据和工具执行记录
+├── state.sqlite        # LangGraph checkpoints
+├── runtime.sqlite      # 运行元数据、笔记和工具执行记录
 ├── transcript.jsonl    # 原始消息和执行/压缩事件，追加写入
 └── artifacts/          # 完整工具输出、进程日志、cwd 回传文件
 ```
 
 会话目录可通过 `--session-dir` 更改。同一会话只允许一个写入者。
+运行元数据与异步 checkpoint 分库，避免后台完成通知或笔记写入与 checkpoint 争锁。
 恢复加载当前有效上下文，直接复用已保存摘要。
 已经落盘的工具结果按调用 ID 复用；已开始但结果未知的调用不会自动重跑，
 而是让模型先检查文件或日志。恢复上下文也不会回滚已经修改的项目文件。
@@ -137,6 +142,7 @@ uv run mini-harness --help
 ```
 
 测试使用真实临时文件、Bash 进程、SQLite 和 LangGraph，只替换外部模型调用。
+另有本地 HTTP/SSE 测试，通过真实 OpenAI 适配器验证 CLI 工具调用、流输出和会话恢复。
 真实供应商 API 仍需配置凭据后做一次端到端验证。
 
 详细设计与实施记录见 [spec](docs/superpowers/specs/2026-10-17-harness.md)

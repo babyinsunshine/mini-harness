@@ -144,3 +144,26 @@ async def test_reopened_session_reports_interrupted_background_task(tmp_path):
             assert event["status"] == "interrupted"
             assert event["task_id"] == result["task_id"]
             assert manager.tasks == {}
+
+
+async def test_cleanup_handles_children_after_shell_leader_exits(tmp_path):
+    from mini_harness.processes import ProcessManager
+
+    with Session(tmp_path / "s", tmp_path) as session:
+        manager = ProcessManager(session)
+        child = None
+        try:
+            result = await manager.run("sleep 60 & echo $!")
+            child = int(Path(result["output_path"]).read_text().strip())
+            await manager.close()
+            stat = Path(f"/proc/{child}/stat")
+            assert not stat.exists() or stat.read_text().split()[2] == "Z"
+        finally:
+            if child:
+                import os
+                import signal
+
+                try:
+                    os.kill(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
