@@ -25,7 +25,9 @@ class Session:
             raise RuntimeError(f"Session {self.id} is already open") from None
         self.connection = sqlite3.connect(self.database)
         self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)"
+        )
         self.connection.execute(
             "CREATE TABLE IF NOT EXISTS executions "
             "(id TEXT PRIMARY KEY, status TEXT NOT NULL, result TEXT)"
@@ -41,12 +43,32 @@ class Session:
         self.transcript = self.directory / "transcript.jsonl"
         self._events = set()
         if self.transcript.exists():
-            with self.transcript.open() as stream:
-                for line in stream:
-                    self._events.add(json.loads(line)["id"])
+            try:
+                self._load_events()
+            except Exception:
+                self.close()
+                raise
         # A PID from an earlier harness process is never reused as a live handle.
         self.connection.execute("UPDATE executions SET status='unknown' WHERE status='started'")
         self.connection.commit()
+
+    def _load_events(self):
+        with self.transcript.open("r+b") as stream:
+            while True:
+                position = stream.tell()
+                line = stream.readline()
+                if not line:
+                    return
+                try:
+                    self._events.add(json.loads(line)["id"])
+                except (ValueError, UnicodeError):
+                    if line.endswith(b"\n"):
+                        raise ValueError(f"Corrupt transcript record at byte {position}") from None
+                    stream.truncate(position)
+                    return
+                if not line.endswith(b"\n"):
+                    stream.write(b"\n")
+                    return
 
     def get(self, key: str, default=None):
         row = self.connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
@@ -110,7 +132,9 @@ class Session:
 
     def start_execution(self, call_id: str):
         with self.connection:
-            self.connection.execute("INSERT INTO executions VALUES (?, 'started', NULL)", (call_id,))
+            self.connection.execute(
+                "INSERT INTO executions VALUES (?, 'started', NULL)", (call_id,)
+            )
 
     def finish_execution(self, call_id: str, result: dict):
         with self.connection:

@@ -16,7 +16,9 @@ def test_reopen_retains_cwd_and_deduplicates_history(tmp_path):
     with Session(directory) as session:
         assert session.cwd == tmp_path / "中文目录"
         session.record_message(message)
-    events = [json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()]
+    events = [
+        json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()
+    ]
     assert len(events) == 1
     assert events[0]["message"]["data"]["content"] == "keep my original request"
 
@@ -65,3 +67,19 @@ def test_empty_edit_and_invalid_read_ranges_are_rejected(tmp_path):
             edit_file(session, "a", "", "x")
         with pytest.raises(ValueError):
             read_file(session, "a", offset=0)
+
+
+def test_partial_last_log_record_is_recovered_after_crash(tmp_path):
+    from mini_harness.session import Session
+
+    directory = tmp_path / "s"
+    with Session(directory, tmp_path) as session:
+        session.record("test", event_id="first", text="keep this")
+    with (directory / "transcript.jsonl").open("ab") as stream:
+        stream.write(b'{"id": "incomplete')
+    with Session(directory) as session:
+        session.record("test", event_id="second", text="continue")
+    records = [
+        json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()
+    ]
+    assert [record["id"] for record in records] == ["first", "second"]

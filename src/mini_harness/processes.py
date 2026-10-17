@@ -32,6 +32,12 @@ class ProcessManager:
         self.tasks: dict[str, ProcessTask] = {}
         self.events = asyncio.Queue()
         self._lock = asyncio.Lock()
+        saved = self.session.get("processes", {})
+        for record in saved.values():
+            if record["status"] == "running":
+                record.update(status="interrupted", reason="harness_restarted")
+                self.events.put_nowait(record)
+        self.session.set("processes", saved)
 
     async def run(self, command: str, timeout: float = 120, run_in_background: bool = False):
         if timeout <= 0:
@@ -49,11 +55,21 @@ class ProcessManager:
                     'eval -- "$2"'
                 )
                 process = await asyncio.create_subprocess_exec(
-                    "bash", "--noprofile", "--norc", "-c", script,
-                    "mini-harness", self.env_file, command,
-                    cwd=self.session.cwd, env=self.environment,
-                    stdin=asyncio.subprocess.PIPE, stdout=log, stderr=asyncio.subprocess.STDOUT,
-                    start_new_session=True, pass_fds=(directory.fileno(),),
+                    "bash",
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    script,
+                    "mini-harness",
+                    self.env_file,
+                    command,
+                    cwd=self.session.cwd,
+                    env=self.environment,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=log,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                    pass_fds=(directory.fileno(),),
                 )
             task = ProcessTask(task_id, process, output, cwd_file, command)
             self.tasks[task_id] = task
@@ -76,6 +92,7 @@ class ProcessManager:
                         if directory_name and Path(directory_name).is_dir():
                             self.session.cwd = Path(directory_name)
             result = self.describe(task)
+            self._persist(result)
             self.session.record("process", **result, command=command)
             return result
 
@@ -93,8 +110,15 @@ class ProcessManager:
 
     def _notify(self, task: ProcessTask):
         if not task.notified:
-            self.events.put_nowait(self.describe(task))
+            result = self.describe(task)
+            self._persist(result)
+            self.events.put_nowait(result)
             task.notified = True
+
+    def _persist(self, result):
+        records = self.session.get("processes", {})
+        records[result["task_id"]] = result
+        self.session.set("processes", records)
 
     def describe(self, task: ProcessTask) -> dict:
         with task.output.open("rb") as stream:

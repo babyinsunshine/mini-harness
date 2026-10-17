@@ -8,7 +8,13 @@ from uuid import uuid4
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ExtendedModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
@@ -17,12 +23,22 @@ from .session import Session
 
 
 def conversation_text(messages) -> str:
-    return json.dumps([
-        {"role": m.type, "content": m.content,
-         **({"tool_calls": m.tool_calls} if isinstance(m, AIMessage) and m.tool_calls else {}),
-         **({"tool_call_id": m.tool_call_id} if isinstance(m, ToolMessage) else {})}
-        for m in messages
-    ], ensure_ascii=False)
+    return json.dumps(
+        [
+            {
+                "role": m.type,
+                "content": m.content,
+                **(
+                    {"tool_calls": m.tool_calls}
+                    if isinstance(m, AIMessage) and m.tool_calls
+                    else {}
+                ),
+                **({"tool_call_id": m.tool_call_id} if isinstance(m, ToolMessage) else {}),
+            }
+            for m in messages
+        ],
+        ensure_ascii=False,
+    )
 
 
 def estimate_tokens(messages) -> int:
@@ -46,10 +62,17 @@ def flatten(groups):
 
 def overflow_error(error: Exception) -> bool:
     text = str(error).lower()
-    return any(marker in text for marker in (
-        "prompt_too_long", "prompt is too long", "context_length_exceeded",
-        "maximum context length", "input is too long", "context window exceeded",
-    ))
+    return any(
+        marker in text
+        for marker in (
+            "prompt_too_long",
+            "prompt is too long",
+            "context_length_exceeded",
+            "maximum context length",
+            "input is too long",
+            "context window exceeded",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -62,6 +85,7 @@ class ContextPolicy:
     micro_trigger: int = 64000
     micro_keep: int = 5
     notes: bool = False
+    auto: bool = True
     notes_min_tokens: int = 10000
     notes_growth: int = 5000
 
@@ -96,18 +120,22 @@ class ContextMiddleware(AgentMiddleware):
         if self.tokens(messages) < self.policy.micro_trigger:
             return messages
         results = [m.id for m in messages if isinstance(m, ToolMessage)]
-        old = set(results[:-self.policy.micro_keep])
+        old = set(results[: -self.policy.micro_keep])
         output = []
         for message in messages:
             if isinstance(message, ToolMessage) and message.id in old:
                 if str(message.content).startswith("[Old tool result content cleared"):
                     output.append(message)
                     continue
-                text = message.content if isinstance(message.content, str) else json.dumps(message.content)
+                text = (
+                    message.content
+                    if isinstance(message.content, str)
+                    else json.dumps(message.content)
+                )
                 path = self.session.save_artifact(text)
-                message = message.model_copy(update={
-                    "content": f"[Old tool result content cleared; full output: {path}]"
-                })
+                message = message.model_copy(
+                    update={"content": f"[Old tool result content cleared; full output: {path}]"}
+                )
             output.append(message)
         return output
 
@@ -115,14 +143,23 @@ class ContextMiddleware(AgentMiddleware):
         groups = rounds(messages)
         prompt = (NOTES_PROMPT if notes else SUMMARY_PROMPT) + "\n" + instructions
         for attempt in range(3):
-            request = [SystemMessage(content=prompt), HumanMessage(content=conversation_text(flatten(groups)))]
+            request = [
+                SystemMessage(content=prompt),
+                HumanMessage(content=conversation_text(flatten(groups))),
+            ]
             if estimate_tokens(request) + self.policy.reserve >= self.policy.window:
                 if len(groups) <= 1:
-                    raise ValueError("Single message exceeds summary input budget; inspect transcript")
+                    raise ValueError(
+                        "Single message exceeds summary input budget; inspect transcript"
+                    )
                 groups.pop(0)
                 continue
             try:
-                response = await self.model.ainvoke(request, max_tokens=self.policy.reserve)
+                response = await self.model.ainvoke(
+                    request,
+                    max_tokens=self.policy.reserve,
+                    config={"tags": ["nostream"]},
+                )
             except Exception as error:
                 if not overflow_error(error) or attempt == 2 or len(groups) <= 1:
                     raise
@@ -148,7 +185,11 @@ class ContextMiddleware(AgentMiddleware):
             first, last = start or 0, len(groups) if end is None else end
             if not 0 <= first < last <= len(groups):
                 raise ValueError(f"Expected round range 0 <= start < end <= {len(groups)}")
-            before, selected, after = flatten(groups[:first]), flatten(groups[first:last]), flatten(groups[last:])
+            before, selected, after = (
+                flatten(groups[:first]),
+                flatten(groups[first:last]),
+                flatten(groups[last:]),
+            )
         else:
             keep = 0 if force else min(self.policy.keep_rounds, max(0, len(groups) - 1))
             before = []
@@ -162,13 +203,12 @@ class ContextMiddleware(AgentMiddleware):
             if notes["covered_until"] in ids:
                 uncovered = ids.index(notes["covered_until"]) + 1
                 recent = len(messages) - len(after)
-                tail = flatten(rounds(messages)[0:])  # keep original message objects
-                tail = tail[min(uncovered, recent):]
+                tail = messages[min(uncovered, recent) :]
                 # Expand to the containing round; never orphan a tool result.
                 if tail and isinstance(tail[0], ToolMessage):
                     for group in groups:
                         if tail[0] in group:
-                            tail = messages[messages.index(group[0]):]
+                            tail = messages[messages.index(group[0]) :]
                             break
                 candidate = [self._summary_message(notes["text"]), *tail]
                 if self.tokens(candidate) < self.policy.auto_limit:
@@ -176,18 +216,51 @@ class ContextMiddleware(AgentMiddleware):
         if summary is None:
             summary = await self._summary(selected, instructions)
         result = [*before, self._summary_message(summary), *after]
+        if not partial:
+            result = self.restore_files(result)
         if self.tokens(result) >= self.policy.auto_limit:
             raise ValueError("Compacted context still exceeds budget; reduce retained rounds")
         self.cleanup()
-        self.session.record("compact", source="notes" if notes and summary == notes["text"] else "model",
-                            before_tokens=self.tokens(messages), after_tokens=self.tokens(result),
-                            covered_ids=[m.id for m in selected], partial=partial)
+        self.session.record(
+            "compact",
+            source="notes" if notes and summary == notes["text"] else "model",
+            before_tokens=self.tokens(messages),
+            after_tokens=self.tokens(result),
+            covered_ids=[m.id for m in selected],
+            partial=partial,
+        )
+        return result
+
+    def restore_files(self, messages):
+        from .tools import read_file
+
+        result = list(messages)
+        remaining = 50000
+        for item in reversed(self.session.get("recent_files", [])):
+            budget = min(5000, remaining, self.policy.auto_limit - self.tokens(result) - 256)
+            if budget < 128:
+                break
+            try:
+                text = read_file(self.session, item["path"], item["offset"], item["limit"])
+            except (OSError, UnicodeError):
+                continue
+            text = text.encode()[: budget * 3].decode("utf-8", errors="ignore")
+            attachment = HumanMessage(
+                content=f"[Re-read after compaction: {item['path']}]\n{text}",
+                id=str(uuid4()),
+            )
+            if self.tokens([*result, attachment]) < self.policy.auto_limit:
+                result.append(attachment)
+                remaining -= estimate_tokens([attachment])
         return result
 
     def _summary_message(self, text):
         return HumanMessage(
-            content=("[Conversation continuation summary]\n" + text +
-                     f"\nFull original transcript: {self.session.transcript}"),
+            content=(
+                "[Conversation continuation summary]\n"
+                + text
+                + f"\nFull original transcript: {self.session.transcript}"
+            ),
             id=str(uuid4()),
         )
 
@@ -211,14 +284,16 @@ class ContextMiddleware(AgentMiddleware):
             self.session.record_message(message)
         result = self.micro(messages)
         failures = self.session.get("compact_failures", 0)
-        if self.tokens(result) >= self.policy.auto_limit and failures < 3:
+        if self.policy.auto and self.tokens(result) >= self.policy.auto_limit and failures < 3:
             try:
                 result = await self.compact(result)
             except Exception as error:
                 self.session.set("compact_failures", failures + 1)
                 self.session.record("compact_error", error=str(error))
         if self.tokens(result) >= self.policy.block_limit:
-            raise ValueError("Context exceeds request budget; use /compact or a larger context window")
+            raise ValueError(
+                "Context exceeds request budget; use /compact or a larger context window"
+            )
         return result
 
     async def abefore_model(self, state, runtime):
@@ -231,10 +306,14 @@ class ContextMiddleware(AgentMiddleware):
             self.session.record_message(message)
         count = self.tokens(state["messages"])
         last = state["messages"][-1]
-        if (self.policy.notes and count >= self.policy.notes_min_tokens
-                and count - self._notes_tokens >= self.policy.notes_growth
-                and isinstance(last, AIMessage) and not last.tool_calls
-                and (self.notes_task is None or self.notes_task.done())):
+        if (
+            self.policy.notes
+            and count >= self.policy.notes_min_tokens
+            and count - self._notes_tokens >= self.policy.notes_growth
+            and isinstance(last, AIMessage)
+            and not last.tool_calls
+            and (self.notes_task is None or self.notes_task.done())
+        ):
             self._notes_tokens = count
             self.notes_task = asyncio.create_task(self._background_notes(state["messages"]))
 
@@ -254,9 +333,15 @@ class ContextMiddleware(AgentMiddleware):
         response = await handler(request.override(messages=recovered))
         return ExtendedModelResponse(
             model_response=response,
-            command=Command(update={"messages": [
-                RemoveMessage(id=REMOVE_ALL_MESSAGES), *recovered, *response.result,
-            ]}),
+            command=Command(
+                update={
+                    "messages": [
+                        RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                        *recovered,
+                        *response.result,
+                    ]
+                }
+            ),
         )
 
     async def close(self):

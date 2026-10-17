@@ -1,7 +1,5 @@
 import asyncio
-import os
 import shlex
-import signal
 from pathlib import Path
 
 import pytest
@@ -26,7 +24,9 @@ async def test_cwd_persists_but_export_does_not(tmp_path):
     target.mkdir()
     with Session(tmp_path / "session", tmp_path) as session:
         async with ProcessManager(session) as manager:
-            result = await manager.run(f"cd {shlex.quote(str(target))}; export LOCAL_TEST_VALUE=hello")
+            result = await manager.run(
+                f"cd {shlex.quote(str(target))}; export LOCAL_TEST_VALUE=hello"
+            )
             assert result["exit_code"] == 0
             assert session.cwd == target
             result = await manager.run('printf "%s|%s" "$PWD" "${LOCAL_TEST_VALUE-unset}"')
@@ -73,7 +73,9 @@ async def test_background_cd_never_changes_session_cwd(tmp_path):
     target.mkdir()
     with Session(tmp_path / "session", tmp_path) as session:
         async with ProcessManager(session) as manager:
-            result = await manager.run(f"cd {shlex.quote(str(target))}; pwd", run_in_background=True)
+            result = await manager.run(
+                f"cd {shlex.quote(str(target))}; pwd", run_in_background=True
+            )
             await wait_done(manager, result["task_id"])
             assert session.cwd == tmp_path
             assert Path(result["output_path"]).read_text().strip() == str(target)
@@ -123,3 +125,22 @@ async def test_explicit_exit_captures_directory(tmp_path):
             result = await manager.run(f"cd {shlex.quote(str(target))}; exit 7")
             assert result["exit_code"] == 7
             assert session.cwd == target
+
+
+async def test_reopened_session_reports_interrupted_background_task(tmp_path):
+    from mini_harness.processes import ProcessManager
+
+    directory = tmp_path / "s"
+    with Session(directory, tmp_path) as session:
+        async with ProcessManager(session) as manager:
+            result = await manager.run("cat", run_in_background=True)
+            saved = session.get("processes")
+            assert saved[result["task_id"]]["status"] == "running"
+        # Simulate a crash record: no live process is carried into the next harness.
+        session.set("processes", saved)
+    with Session(directory) as session:
+        async with ProcessManager(session) as manager:
+            event = manager.drain_events()[0]
+            assert event["status"] == "interrupted"
+            assert event["task_id"] == result["task_id"]
+            assert manager.tasks == {}

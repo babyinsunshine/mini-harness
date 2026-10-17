@@ -26,10 +26,14 @@ class SummaryModel:
 def history():
     return [
         HumanMessage(content="Do not remove JWT support", id="u1"),
-        AIMessage(content="", id="a1", tool_calls=[
-            {"name": "bash", "args": {}, "id": "t1"},
-            {"name": "read_file", "args": {}, "id": "t2"},
-        ]),
+        AIMessage(
+            content="",
+            id="a1",
+            tool_calls=[
+                {"name": "bash", "args": {}, "id": "t1"},
+                {"name": "read_file", "args": {}, "id": "t2"},
+            ],
+        ),
         ToolMessage(content="old output " * 200, tool_call_id="t1", id="r1"),
         ToolMessage(content="other old output " * 200, tool_call_id="t2", id="r2"),
         AIMessage(content="Keep both auth methods", id="a2"),
@@ -40,8 +44,17 @@ def history():
 def policy(**changes):
     from mini_harness.context import ContextPolicy
 
-    return replace(ContextPolicy(window=12000, reserve=1000, auto_buffer=1000,
-                                 block_buffer=200, keep_rounds=2, micro_trigger=100000), **changes)
+    return replace(
+        ContextPolicy(
+            window=12000,
+            reserve=1000,
+            auto_buffer=1000,
+            block_buffer=200,
+            keep_rounds=2,
+            micro_trigger=100000,
+        ),
+        **changes,
+    )
 
 
 async def test_micro_preserves_recent_result_and_original_transcript(tmp_path):
@@ -148,8 +161,9 @@ async def test_reactive_recovery_returns_persistent_message_override(tmp_path):
 
     with Session(tmp_path / "s", tmp_path) as session:
         context = ContextMiddleware(session, SummaryModel(), policy())
-        request = ModelRequest(model=SummaryModel(), messages=history(),
-                               state={"messages": history()}, tools=[])
+        request = ModelRequest(
+            model=SummaryModel(), messages=history(), state={"messages": history()}, tools=[]
+        )
         attempts = []
 
         async def handler(req):
@@ -171,7 +185,9 @@ async def test_ordinary_model_error_is_not_retried(tmp_path):
     with Session(tmp_path / "s", tmp_path) as session:
         model = SummaryModel()
         context = ContextMiddleware(session, model, policy())
-        request = ModelRequest(model=model, messages=history(), state={"messages": history()}, tools=[])
+        request = ModelRequest(
+            model=model, messages=history(), state={"messages": history()}, tools=[]
+        )
 
         async def handler(req):
             raise RuntimeError("authentication failed")
@@ -179,3 +195,34 @@ async def test_ordinary_model_error_is_not_retried(tmp_path):
         with pytest.raises(RuntimeError, match="authentication"):
             await context.awrap_model_call(request, handler)
         assert not model.inputs
+
+
+async def test_compaction_rereads_recent_file_and_respects_restoration_budget(tmp_path):
+    from mini_harness.context import ContextMiddleware
+    from mini_harness.tools import read_file
+
+    target = tmp_path / "current.py"
+    target.write_text("old version\n")
+    with Session(tmp_path / "s", tmp_path) as session:
+        read_file(session, "current.py")
+        target.write_text("new version\n")
+        context = ContextMiddleware(session, SummaryModel(), policy())
+        result = await context.compact(history())
+        assert any(
+            "current.py" in str(m.content) and "new version" in str(m.content) for m in result
+        )
+        assert context.tokens(result) < context.policy.auto_limit
+
+
+async def test_disabling_auto_keeps_manual_compact_available(tmp_path):
+    from mini_harness.context import ContextMiddleware
+
+    with Session(tmp_path / "s", tmp_path) as session:
+        model = SummaryModel()
+        context = ContextMiddleware(session, model, policy(auto=False))
+        messages = [HumanMessage(content="x" * 30000, id="u")]
+        result = await context.prepare(messages)
+        assert result == messages
+        assert not model.inputs
+        await context.compact(messages)
+        assert model.inputs
