@@ -98,7 +98,7 @@ async def test_invalid_or_unknown_skills_do_not_read_outside_the_catalog(tmp_pat
         assert "PRIVATE DATA" not in result.text
 
 
-@pytest.mark.parametrize("link", ["root", "skill", "file", "loop"])
+@pytest.mark.parametrize("link", ["root", "skill", "file"])
 async def test_skill_symlinks_cannot_bypass_project_file_permissions(tmp_path, link):
     project = tmp_path / "project"
     project.mkdir()
@@ -112,8 +112,7 @@ async def test_skill_symlinks_cannot_bypass_project_file_permissions(tmp_path, l
         (root / "python-testing").symlink_to(outside, target_is_directory=True)
     else:
         (root / "python-testing").mkdir(parents=True)
-        target = "SKILL.md" if link == "loop" else outside / "SKILL.md"
-        (root / "python-testing" / "SKILL.md").symlink_to(target)
+        (root / "python-testing" / "SKILL.md").symlink_to(outside / "SKILL.md")
     model = ScriptedModel(responses=[
         call("list_skills", {}, "list"),
         call("load_skill", {"name": "python-testing"}, "load"),
@@ -124,6 +123,21 @@ async def test_skill_symlinks_cannot_bypass_project_file_permissions(tmp_path, l
         results = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
         assert all(result.status == "error" for result in results)
         assert all("PRIVATE SKILL INSTRUCTIONS" not in result.text for result in results)
+
+
+async def test_circular_skill_link_returns_a_tool_error_and_model_can_continue(tmp_path):
+    project = tmp_path / "project"
+    directory = project / ".agents" / "skills" / "loop"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").symlink_to("SKILL.md")
+    model = ScriptedModel(responses=[
+        call("load_skill", {"name": "loop"}, "load"), AIMessage(content="Still running")
+    ])
+    async with Harness.open(project, tmp_path / "session", model) as harness:
+        assert await consume(harness, "Load the specified skill") == "Still running"
+        result = next(m for m in model.seen[-1] if isinstance(m, ToolMessage))
+        assert result.status == "error"
+        assert len(model.seen) == 2
 
 
 async def test_compacting_only_skill_instructions_explains_why_they_are_retained(tmp_path):
