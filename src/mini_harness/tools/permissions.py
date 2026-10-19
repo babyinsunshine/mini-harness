@@ -6,6 +6,7 @@ from pathlib import Path
 from langchain_core.messages import ToolMessage
 
 from ..session import Session
+from .skills import skill_path
 
 SYSTEM_PATHS = ("/etc", "/boot", "/proc", "/sys", "/dev", "/usr", "/bin", "/sbin", "/lib")
 READ_FLAGS = {
@@ -55,6 +56,14 @@ def classify(tool_call: dict, session: Session) -> tuple[str, str]:
     name, args = tool_call["name"], tool_call.get("args", {})
     if name in {"read_file", "write_file", "edit_file"}:
         return _file_rule(args.get("path"), session, writing=name != "read_file")
+    if name == "list_skills":
+        return "allow", "Read project skill descriptions"
+    if name == "load_skill":
+        try:
+            path = skill_path(session, args.get("name"))
+        except (ValueError, RuntimeError) as error:
+            return "deny", str(error)
+        return _file_rule(str(path), session, writing=False)
     if name == "bash":
         return _bash_rule(args.get("command"), session)
     if name == "stop_task":

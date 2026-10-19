@@ -103,6 +103,8 @@ class ContextManager:
         messages_before, summary_messages, messages_after = split_for_summary(
             messages, self.policy.keep_rounds, start_group, end_group
         )
+        if not summary_messages:
+            raise ValueError("No messages to summarize outside protected skill groups")
         partial = start_group is not None or end_group is not None
         summary = await summarize(summary_messages, self.model, self.policy, instructions)
         result = self.with_runtime_context(

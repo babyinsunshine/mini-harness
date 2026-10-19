@@ -3,7 +3,12 @@ name = "mini-harness"
 version = "0.1.0"
 description = "A readable, modular CLI coding harness built on LangChain and LangGraph."
 requires-python = ">=3.11"
-dependencies = ["langchain>=1.4.6,<2", "langgraph>=1.2.16,<2", "langgraph-checkpoint-sqlite>=3.1.2,<4"]
+dependencies = [
+    "langchain>=1.4.6,<2",
+    "langgraph>=1.2.16,<2",
+    "langgraph-checkpoint-sqlite>=3.1.2,<4",
+    "PyYAML>=6,<7",
+]
 
 [project.optional-dependencies]
 anthropic = ["langchain-anthropic>=1,<2"]

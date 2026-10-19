@@ -134,6 +134,44 @@ uv run mini-harness --model 'openai:deepseek-flash' --base-url 'https://api.deep
 当前工作目录和根目录 `AGENTS.md` 会在调用模型前检查，首次或内容变化时追加运行上下文
 消息；不改写之前的消息，保留普通工具循环中的请求前缀。压缩后会补齐最新运行上下文。
 
+## Skills
+
+模型通过两个普通工具按需发现和加载 skill，系统提示只说明工具用法，不包含技能目录：
+
+- `list_skills()`：读取项目技能的 `name` 和 `description`，不返回正文。
+- `load_skill(name)`：返回选中技能的完整正文、名称和 `directory` 绝对路径。
+
+第一版只支持初始项目目录下的 `.agents/skills/`：
+
+```text
+.agents/skills/
+└── python-testing/
+    ├── SKILL.md
+    ├── references/testing.md
+    └── scripts/check.py
+```
+
+`SKILL.md` 的最小示例：
+
+```markdown
+---
+name: python-testing
+description: 为本项目编写或调整 Python 测试时使用。
+---
+先阅读 references/testing.md，再编写测试。
+使用 uv run pytest -q 执行测试。
+```
+
+名称须与文件夹一致，使用小写字母、数字和连字符；描述支持 YAML 多行文本。
+模型从 `list_skills` 的描述中选择技能，调用 `load_skill` 后，再按正文要求使用
+`read_file` 读取参考资料、使用 Bash 执行脚本。相对资源路径以返回的技能目录为基准。
+加载技能只读取文件，后续操作沿用现有权限规则；skill 中的字段不会扩大执行权限。
+
+两个工具在调用时重新读取文件，所以新增或修改技能在下次调用时生效，`cd` 不改变扫描目录。
+只读取项目技能目录中的文件，越界路径和指向目录外的符号链接被拒绝；格式错误作为工具错误返回。
+成功加载的指令所在完整工具组受 Micro、摘要和 Reactive 压缩保护，并随会话检查点恢复；
+技能列表作为普通工具结果参与压缩。
+
 ## 上下文压缩
 
 设计基线是讨论中选定的[压缩机制文章](https://deepseek.csdn.net/6a2233c610ee7a33f277cf93.html)。
@@ -249,6 +287,7 @@ src/mini_harness/
 ├── tools/
 │   ├── factory.py       # 显式列出模型可调用的工具
 │   ├── files.py         # 文件读取、写入、精确替换
+│   ├── skills.py        # 按需列出项目技能、加载指令与资源路径
 │   ├── processes.py     # Bash、cwd、stdin、后台任务与清理
 │   └── permissions.py   # allow / ask / deny 与单次审批
 ├── cli/
@@ -286,7 +325,7 @@ CLI 将模型正文输出到 stdout，模型请求、工具开始/结果、后�
 工具事件带调用 ID，结束事件带退出码；Bash 非零退出会记录为 error。
 请求失败时 CLI 显示异常及其底层原因，便于定位代理、DNS 或连接问题。
 
-子 agent、MCP、skills、任务/计划、长期记忆和 hooks 的具体方案继续逐模块讨论，
+子 agent、MCP、任务/计划、长期记忆和 hooks 的具体方案继续逐模块讨论，
 当前没有为它们增加占位实现或通用插件框架。
 
 ## 验证

@@ -1,13 +1,28 @@
-"""将文件操作和进程管理绑定成模型可调用的工具，新增工具从这里接入。"""
+"""将文件、进程和 skill 操作绑定成模型工具，新增工具从这里接入。"""
 
 from langchain_core.tools import tool
 
 from ..session import Session
 from .files import edit_file, read_file, write_file
+from .skills import list_skills, load_skill
 
 
 def create_tools(session: Session, processes):
     """绑定会话资源；工具名和参数直接构成模型看到的调用协议。"""
+    @tool("list_skills")
+    async def list_skills_tool() -> list[dict]:
+        """Discover project skills and their descriptions before choosing one to load."""
+        return list_skills(session)
+
+    @tool("load_skill")
+    async def load_skill_tool(name: str) -> dict:
+        """Load a skill's full instructions and absolute directory. Use a name from list_skills.
+
+        Resolve references and scripts relative to the returned directory.
+        Read resources with read_file and run scripts with bash when instructed.
+        """
+        return load_skill(session, name)
+
     @tool("read_file")
     async def read_file_tool(path: str, offset: int = 1, limit: int = 200) -> dict:
         """Read UTF-8 lines. offset is 1-based; limit is the maximum number of lines.
@@ -49,4 +64,7 @@ def create_tools(session: Session, processes):
         """Stop a background command and its child processes."""
         return await processes.stop_task(task_id)
 
-    return [bash, read_file_tool, write_file_tool, edit_file_tool, send_input, stop_task]
+    return [
+        bash, read_file_tool, write_file_tool, edit_file_tool, send_input, stop_task,
+        list_skills_tool, load_skill_tool,
+    ]
