@@ -17,11 +17,13 @@ class State(MessagesState):
     """从 MessagesState 继承 messages 字段和消息合并规则。
 
     pending_calls 是待处理的工具调用；next 是回复校验后选择的节点。
+    last_user_input_id 在压缩后仍保留，防止恢复时重新提交已接收的子任务指令。
     """
     pending_calls: list[dict]
     approved: bool
     repair_attempts: int
     next: str
+    last_user_input_id: str
 
 
 @dataclass

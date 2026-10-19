@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import os
+import signal
 from typing import Any
 
 import pytest
@@ -263,6 +264,10 @@ async def test_close_and_shutdown_can_cancel_a_child_before_it_starts(tmp_path):
         interrupted = parent.subagents.spawn("Interrupt immediately")
         await parent.subagents.interrupt()
         assert parent.session.get("subagents")[interrupted["agent_id"]]["status"] == "interrupted"
+        await consume(parent, "Resume before the child received its first input")
+        assert (await parent.subagents.wait(interrupted["agent_id"]))["status"] == "waiting"
+        history = next(messages for child, messages in model.seen if child)
+        assert sum(m.content == "Interrupt immediately" for m in history) == 1
 
 
 async def test_failure_and_closed_state_survive_reopen(tmp_path):
@@ -357,3 +362,115 @@ async def test_two_children_and_parent_can_wait_for_model_requests_independently
             parent.subagents.wait(first["agent_id"]), parent.subagents.wait(second["agent_id"]),
         )
         assert all(result["status"] == "waiting" for result in results)
+
+
+@pytest.mark.parametrize("interruption", ["timeout", "cancel_twice"])
+async def test_interruption_during_cleanup_waits_for_every_process(tmp_path, interruption):
+    ready, release = asyncio.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    pids = []
+
+    async def reply(child, messages):
+        results = [m for m in messages if isinstance(m, ToolMessage)]
+        if len(results) < 4:
+            index = len(results)
+            return call("bash", {
+                "command": f"echo $$ > pid-{index}; sleep 60", "run_in_background": True,
+            }, f"background-{index}")
+        ready.set()
+        if interruption == "timeout":
+            await asyncio.sleep(max(0, started_at + 2.75 - loop.time()))
+        else:
+            await release.wait()
+        return AIMessage(content="finished")
+
+    async def approve(tool_call, reason):
+        return True
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    try:
+        async with Harness.open(tmp_path, tmp_path / "parent", AgentModel(handler=reply),
+                                approve=approve) as parent:
+            started_at = loop.time()
+            agent = parent.subagents.spawn("Start four processes", timeout=3)
+            await asyncio.wait_for(ready.wait(), 5)
+            pids = [int((tmp_path / f"pid-{index}").read_text()) for index in range(4)]
+            if interruption == "cancel_twice":
+                release.set()
+                async with asyncio.timeout(5):
+                    while alive(pids[0]):
+                        await asyncio.sleep(0.005)
+                task = parent.subagents.tasks[agent["agent_id"]]
+                task.cancel()
+                await asyncio.sleep(0.05)
+                task.cancel()
+            result = await parent.subagents.wait(agent["agent_id"])
+            assert result["status"] == (
+                "timed_out" if interruption == "timeout" else "interrupted"
+            )
+            assert not any(alive(pid) for pid in pids)
+    finally:
+        # 红灯运行也必须收拾测试进程，避免把缺陷留在宿主环境。
+        for pid in pids:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        await asyncio.sleep(0.15)
+
+
+async def test_recovery_after_auto_compaction_does_not_reissue_the_original_task(tmp_path):
+    (tmp_path / "large.txt").write_text("x" * 11000)
+    compacted = asyncio.Event()
+    original_task = "Original delegated request"
+
+    async def reply(child, messages):
+        if "Summarize the supplied" in messages[0].content:
+            return AIMessage(content="Original task in progress; large.txt already read. Continue.")
+        if not child:
+            return AIMessage(content="parent")
+        if any("[Conversation continuation summary]" in str(m.content) for m in messages):
+            assert all(m.content != original_task for m in messages)
+            compacted.set()
+            await asyncio.Event().wait()
+        return call("read_file", {"path": "large.txt"}, "read")
+
+    policy = ContextPolicy(window=20000, reserve=1000, auto_buffer=15000,
+                           block_buffer=500, keep_rounds=0)
+    directory = tmp_path / "parent"
+    async with Harness.open(tmp_path, directory, AgentModel(handler=reply), policy) as parent:
+        agent = parent.subagents.spawn(original_task)
+        await asyncio.wait_for(compacted.wait(), 10)
+    resumed = AgentModel(handler=lambda child, messages: AIMessage(content="continued"))
+    async with Harness.open(tmp_path, directory, resumed, policy) as parent:
+        await consume(parent, "Resume the project")
+        assert (await parent.subagents.wait(agent["agent_id"]))["status"] == "waiting"
+        history = next(messages for child, messages in resumed.seen if child)
+        assert all(m.content != original_task for m in history)
+        assert any("[Conversation continuation summary]" in str(m.content) for m in history)
+
+
+async def test_public_results_bound_output_without_echoing_large_task_inputs(tmp_path):
+    large_task, large_result = "task " * 5000, "result " * 4000
+    model = AgentModel(handler=lambda child, messages: AIMessage(content=large_result))
+    async with Harness.open(tmp_path, tmp_path / "parent", model) as parent:
+        agent = parent.subagents.spawn(large_task)
+        assert "input" not in agent and len(json.dumps(agent)) < 1000
+        result = await parent.subagents.wait(agent["agent_id"])
+        assert "input" not in result and len(json.dumps(result)) < 4000
+        assert "Full result:" in result["result"]
+        assert any(
+            path.read_text() == large_result for path in parent.session.artifacts.glob("*.txt")
+        )
+        assert "input" not in parent.processes.drain_events()[0]
+        continued = parent.subagents.continue_agent(agent["agent_id"], large_task)
+        assert "input" not in continued
+        await parent.subagents.wait(agent["agent_id"])
+        assert "input" not in await parent.subagents.close_agent(agent["agent_id"])

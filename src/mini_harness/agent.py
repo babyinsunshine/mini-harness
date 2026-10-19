@@ -133,13 +133,19 @@ class Harness:
         return recovered_results
 
     async def events(self, user_input: str | None, *, input_id: str | None = None):
-        """接收本次用户输入并产生事件；user_input=None 时仅处理已有会话。"""
+        """接收本次用户输入并产生事件；user_input=None 时仅处理已有会话。
+
+        input_id 用于子任务恢复去重；已接收的相同 ID 只继续上下文，不重发指令。
+        """
         if self.subagents is not None:
             self.subagents.resume_interrupted()
         snapshot = await self.graph.aget_state(self.config)
         messages = self.recover_missing_tool_results(snapshot.values.get("messages", []))
-        if user_input is not None:
-            messages.append(HumanMessage(content=user_input, id=input_id or f"user-{uuid4()}"))
+        last_input_id = snapshot.values.get("last_user_input_id", "")
+        # 消息可能已被摘要替换，是否接收过输入要看检查点字段，不能只查消息 ID。
+        if user_input is not None and (input_id is None or input_id != last_input_id):
+            last_input_id = input_id or f"user-{uuid4()}"
+            messages.append(HumanMessage(content=user_input, id=last_input_id))
         try:
             async for stream_mode, stream_data in self.graph.astream(
                 {
@@ -148,6 +154,7 @@ class Harness:
                     "approved": False,
                     "repair_attempts": 0,
                     "next": "",
+                    "last_user_input_id": last_input_id,
                 },
                 self.config,
                 context=self.resources,

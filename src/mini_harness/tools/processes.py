@@ -211,4 +211,14 @@ class ProcessManager:
         return self
 
     async def __aexit__(self, *_):
-        await self.close()
+        # 超时或再次 Ctrl-C 可以取消执行，但必须等所有进程清理后再关闭 Session。
+        cleanup = asyncio.create_task(self.close())
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        await cleanup
+        if cancelled:
+            raise asyncio.CancelledError

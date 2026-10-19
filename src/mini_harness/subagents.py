@@ -27,6 +27,13 @@ class SubagentManager:
         return self.agents[agent_id]
 
     @staticmethod
+    def _describe(agent):
+        """只返回身份、状态和结果，内部任务原文不反复占用父上下文。"""
+        return {key: agent[key] for key in (
+            "agent_id", "parent_session_id", "session_dir", "status", "timeout", "result",
+        )}
+
+    @staticmethod
     def _validate(message, timeout):
         if not message.strip():
             raise ValueError("A subagent requires a nonempty task or message")
@@ -63,7 +70,7 @@ class SubagentManager:
         self._save()
         # 不继承父图的 writer/callback 上下文，子输出只进入自己的图和会话。
         self.tasks[agent["agent_id"]] = asyncio.create_task(self._run(agent), context=Context())
-        return dict(agent)
+        return self._describe(agent)
 
     async def _run(self, agent):
         from .agent import Harness
@@ -98,14 +105,14 @@ class SubagentManager:
         self._save()
         self.session.record("subagent", **agent)
         if status not in {"interrupted", "closed"}:
-            self.parent.processes.completion_events.put_nowait(dict(agent))
+            self.parent.processes.completion_events.put_nowait(self._describe(agent))
 
     async def wait(self, agent_id: str) -> dict:
         """等待当前轮结束；已结束时直接返回保存的结果。"""
         agent = self._agent(agent_id)
         if task := self.tasks.get(agent_id):
             await asyncio.shield(task)
-        return dict(agent)
+        return self._describe(agent)
 
     async def close_agent(self, agent_id: str) -> dict:
         """停止执行并关闭逻辑子智能体；保留全部会话文件。"""
@@ -115,10 +122,10 @@ class SubagentManager:
         if (task := self.tasks.get(agent_id)) and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        return dict(agent)
+        return self._describe(agent)
 
     def resume_interrupted(self):
-        """恢复父对话时启动原子会话；稳定输入 ID 防止重复追加同一条指令。"""
+        """启动原子会话；由 Harness 的持久化输入 ID 判断指令是否已被接收。"""
         for agent in self.agents.values():
             if agent["status"] == "interrupted":
                 self._start(agent)
