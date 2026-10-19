@@ -291,8 +291,12 @@ CLI 将模型正文输出到 stdout，模型请求、工具开始/结果、后�
 
 ## 验证
 
+GitHub Actions 的 [CI 工作流](.github/workflows/ci.yml) 在推送和 PR 时自动运行，
+也可以从 Actions 页面手动触发。使用 Ubuntu 和 Python 3.11，按 `uv.lock` 安装全部
+可选适配器及开发依赖，执行 Ruff、完整离线测试和 CLI 帮助命令，无需配置模型 API 密钥。
+
 ```bash
-uv sync --all-extras
+uv sync --locked --all-extras --dev
 uv run pytest -q
 uv run ruff check .
 uv run mini-harness --help
