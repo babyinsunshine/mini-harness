@@ -6,5 +6,12 @@ __pycache__/
 *.egg-info/
 .superpowers/
 .harness/
+.mini-harness/
 .env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+*.log
+transcript.jsonl
 dist/

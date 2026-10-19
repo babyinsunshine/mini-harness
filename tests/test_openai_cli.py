@@ -10,7 +10,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 
-def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_path):
+@pytest.mark.parametrize(
+    "outside, broken",
+    [
+        (False, None),
+        (True, None),
+        (False, "length"),
+        (False, "invalid"),
+        (False, "partial-normal"),
+        (False, "partial-missing"),
+    ],
+    ids=[
+        "project-write",
+        "approval-denied",
+        "truncated",
+        "malformed",
+        "partial-normal",
+        "partial-missing",
+    ],
+)
+def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_path, outside, broken):
     pytest.importorskip("langchain_openai")
     requests = []
 
@@ -27,6 +46,16 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_pat
             if any(message["role"] == "tool" for message in body["messages"]):
                 chunks = [({"content": "Local "}, None), ({"content": "verified"}, "stop")]
             else:
+                arguments = json.dumps(
+                    {
+                        "path": str(tmp_path / "outside.txt") if outside else "smoke.txt",
+                        "content": "working\n",
+                    }
+                )
+                if broken == "invalid":
+                    arguments = '{"path": }'
+                elif broken:
+                    arguments = '{"path":"smoke.txt","content":"partial'
                 chunks = [
                     (
                         {
@@ -38,19 +67,14 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_pat
                                     "type": "function",
                                     "function": {
                                         "name": "write_file",
-                                        "arguments": json.dumps(
-                                            {
-                                                "path": "smoke.txt",
-                                                "content": "working\n",
-                                            }
-                                        ),
+                                        "arguments": arguments,
                                     },
                                 }
                             ],
                         },
                         None,
                     ),
-                    ({}, "tool_calls"),
+                    ({}, "length" if broken == "length" else "tool_calls"),
                 ]
             for delta, finish in chunks:
                 chunk = {
@@ -66,8 +90,16 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_pat
                         }
                     ],
                 }
+                if broken == "partial-missing":
+                    del chunk["choices"][0]["finish_reason"]
                 self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
                 self.wfile.flush()
+            usage = {
+                "id": "chatcmpl-local", "object": "chat.completion.chunk", "created": 1,
+                "model": "local-model", "choices": [],
+                "usage": {"prompt_tokens": 700, "completion_tokens": 50, "total_tokens": 750},
+            }
+            self.wfile.write(("data: " + json.dumps(usage) + "\n\n").encode())
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
 
@@ -104,7 +136,16 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_pat
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "Local verified"
-        assert (project / "smoke.txt").read_text() == "working\n"
+        assert "700 in / 50 out" in result.stderr
+        if outside or broken:
+            assert not (tmp_path / "outside.txt").exists()
+            assert not (project / "smoke.txt").exists()
+            assert any(
+                message["role"] == "tool" and "not executed" in message["content"]
+                for message in requests[-1]["messages"]
+            )
+        else:
+            assert (project / "smoke.txt").read_text() == "working\n"
         session_id = next(root.iterdir()).name
         resumed = subprocess.run(
             [
@@ -122,6 +163,7 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_pat
         assert resumed.returncode == 0, resumed.stderr
         assert resumed.stdout.strip() == "Local verified"
         assert all(request["stream"] for request in requests)
+        assert all(request.get("stream_options", {}).get("include_usage") for request in requests)
     finally:
         server.shutdown()
         server.server_close()

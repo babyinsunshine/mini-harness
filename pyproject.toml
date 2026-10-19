@@ -13,7 +13,7 @@ openai = ["langchain-openai>=1,<2"]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.12"]
 
 [project.scripts]
-mini-harness = "mini_harness.cli:main"
+mini-harness = "mini_harness.cli.main:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,8 +1,10 @@
 """Permission rules inspect requests; dangerous examples are never executed."""
 
+
 import pytest
 
 from mini_harness.session import Session
+from mini_harness.tools.permissions import classify
 
 
 @pytest.fixture
@@ -14,8 +16,6 @@ def session(tmp_path):
 
 
 def decision(session, name, **args):
-    from mini_harness.permissions import classify
-
     return classify({"name": name, "args": args, "id": "permission-test"}, session)[0]
 
 
@@ -32,7 +32,9 @@ def test_system_writes_are_denied(session, path):
     assert decision(session, "edit_file", path=path) == "deny"
 
 
-@pytest.mark.parametrize("filename", ["state.sqlite", "runtime.sqlite", "transcript.jsonl"])
+@pytest.mark.parametrize(
+    "filename", ["state.sqlite", "runtime.sqlite", "transcript.jsonl", "state.sqlite-wal"]
+)
 def test_session_records_cannot_be_overwritten(session, filename):
     path = str(session.directory / filename)
     assert decision(session, "write_file", path=path) == "deny"
@@ -44,6 +46,13 @@ def test_environment_script_requires_approval(session):
     assert decision(session, "read_file", path=path) == "allow"
     assert decision(session, "write_file", path=path) == "ask"
     assert decision(session, "edit_file", path=path) == "ask"
+
+
+def test_environment_symlink_target_still_requires_approval(session):
+    target = session.cwd / "shared.sh"
+    target.write_text("export EXAMPLE=1\n")
+    (session.directory / "env.sh").symlink_to(target)
+    assert decision(session, "write_file", path=str(target)) == "ask"
 
 
 def test_resolved_paths_and_cwd_do_not_expand_scope(session, tmp_path):
@@ -82,6 +91,7 @@ def test_resolved_paths_and_cwd_do_not_expand_scope(session, tmp_path):
         ("git push --force", "deny"),
         ("git push --force-with-lease=main", "deny"),
         ("pwd; rm -rf build", "deny"),
+        ("pwd#not-a-comment; rm -rf build", "deny"),
         ("printf x > /etc/example", "deny"),
         ("rm file.txt", "ask"),
         ("python app.py", "ask"),
@@ -102,6 +112,15 @@ def test_resolved_paths_and_cwd_do_not_expand_scope(session, tmp_path):
 )
 def test_shell_decisions(session, command, expected):
     assert decision(session, "bash", command=command) == expected
+
+
+@pytest.mark.parametrize("operation", ["diff", "show"])
+@pytest.mark.parametrize("flags", ["--no-ext-diff --no-textconv", "--no-textconv"])
+def test_git_protection_flags_must_be_options(session, operation, flags):
+    command = f"git {operation} --no-ext-diff -- file.txt {flags}"
+    assert decision(session, "bash", command=command) == "ask"
+    command = f"git {operation} --no-ext-diff --no-textconv -- file.txt"
+    assert decision(session, "bash", command=command) == "allow"
 
 
 def test_control_and_unknown_tools(session):

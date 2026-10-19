@@ -3,7 +3,9 @@
 import shlex
 from pathlib import Path
 
-from .session import Session
+from langchain_core.messages import ToolMessage
+
+from ..session import Session
 
 SYSTEM_PATHS = ("/etc", "/boot", "/proc", "/sys", "/dev", "/usr", "/bin", "/sbin", "/lib")
 READ_FLAGS = {
@@ -17,6 +19,35 @@ READ_FLAGS = {
         "--name-status", "--cached", "--staged", "--no-ext-diff", "--no-textconv",
     },
 }
+
+
+class Permissions:
+    """先审批再进入执行记录；approve 由 CLI 提供，缺省时不执行需要审批的操作。"""
+
+    def __init__(self, session: Session, approve=None):
+        self.session, self.approve = session, approve
+        self.session_trusted = False  # 只保存在内存，恢复会话时重新审批。
+
+    async def check(self, tool_call):
+        """允许时返回 None；拒绝时返回未执行的 ToolMessage。"""
+        action, reason = classify(tool_call, self.session)
+        allowed = action == "allow"
+        if action == "ask" and self.session_trusted:
+            allowed = True
+        elif action == "ask" and self.approve is not None:
+            allowed = await self.approve(tool_call, reason)
+        self.session.record(
+            "permission", call_id=tool_call["id"], action=action, allowed=allowed, reason=reason
+        )
+        if allowed:
+            return None
+        result = ToolMessage(
+            content=f"Permission denied; tool was not executed. {reason}. "
+                    "Do not retry this action through another tool.",
+            tool_call_id=tool_call["id"], id=f"result-{tool_call['id']}", status="error",
+        )
+        self.session.record_message(result)
+        return result
 
 
 def classify(tool_call: dict, session: Session) -> tuple[str, str]:
@@ -35,13 +66,16 @@ def _file_rule(path, session: Session, *, writing: bool) -> tuple[str, str]:
     """先保护系统/会话记录，再检查固定目录范围；cd 不扩大权限。"""
     if not isinstance(path, str) or not path:
         return "ask", "Missing or invalid path"
-    target = session.resolve(path)
+    target = session.resolve_path(path)
     if writing:
         if any(target.is_relative_to(Path(root).resolve()) for root in SYSTEM_PATHS):
             return "deny", "Writing critical system paths is forbidden"
-        if target in {session.database, session.runtime_database, session.transcript}:
+        if target.parent == session.directory and (
+            target.name == "transcript.jsonl"
+            or target.name.split("-", 1)[0] in {"state.sqlite", "runtime.sqlite"}
+        ):
             return "deny", "Overwriting session records is forbidden"
-        if target == session.directory / "env.sh" or ".git" in target.parts:
+        if target == (session.directory / "env.sh").resolve() or ".git" in target.parts:
             return "ask", "Changing executable environment or Git configuration requires approval"
     roots = (Path(session.get("project_root")), session.directory)
     if any(target.is_relative_to(root) for root in roots):
@@ -65,7 +99,7 @@ def _dangerous(words: list[str], session: Session) -> bool:
         return True
     if name == "dd":
         return any(
-            arg.startswith("of=") and session.resolve(arg[3:]).is_relative_to(Path("/dev"))
+            arg.startswith("of=") and session.resolve_path(arg[3:]).is_relative_to(Path("/dev"))
             for arg in args
         )
     if name == "git" and args:
@@ -83,6 +117,8 @@ def _bash_rule(command, session: Session) -> tuple[str, str]:
     try:
         lexer = shlex.shlex(command.replace("\n", ";"), posix=True, punctuation_chars=";&|<>()")
         lexer.whitespace_split = True
+        # shlex 会把词中间的 # 也当注释；禁用它，避免漏掉后面的真实命令。
+        lexer.commenters = ""
         tokens = list(lexer)
     except ValueError:
         return "ask", "Cannot parse this shell command"
@@ -114,7 +150,8 @@ def _bash_rule(command, session: Session) -> tuple[str, str]:
             return "ask", "This Git operation requires approval"
         operation, args = args[0], args[1:]
         # diff/show 可以调用配置中的外部程序，自动允许时必须禁用这些扩展。
-        if operation in {"diff", "show"} and not {"--no-ext-diff", "--no-textconv"} <= set(args):
+        options = args[:args.index("--")] if "--" in args else args
+        if operation in {"diff", "show"} and not {"--no-ext-diff", "--no-textconv"} <= set(options):
             return "ask", "Git diff/show requires --no-ext-diff --no-textconv"
     return _read_arguments(name, args, session)
 

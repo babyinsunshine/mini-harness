@@ -35,29 +35,29 @@
 ### Task 2: Bash and managed processes
 
 **Files:** src/mini_harness/processes.py, tools.py; tests/test_processes.py
-**Interfaces:** ProcessManager(session, env_file=None), async run(command, timeout=120, run_in_background=False), send_input(task_id, text='', eof=False), stop(task_id), close(), drain_events(). run returns serializable status/task_id/exit_code/output_path/preview.
+**Interfaces:** ProcessManager(session, max_runtime=3600), async run(command, timeout=120, run_in_background=False), send_input(task_id, text='', eof=False), stop(task_id), close(), drain_events(). run returns serializable status/task_id/exit_code/output_path/preview.
 
-- [x] Write real subprocess tests: foreground cwd persists, export disappears, env_file loads each time; quoted command and nonzero exit preserve cwd; foreground timeout backgrounds same process; background cwd isolated; stdin and EOF work; stop and cancellation clean children; output remains on disk.
+- [x] Write real subprocess tests: foreground cwd persists, export disappears, session env.sh loads each time; quoted command and nonzero exit preserve cwd; foreground timeout backgrounds same process; background cwd isolated; stdin and EOF work; stop and cancellation clean children; output remains on disk.
 - [x] Run `uv run pytest tests/test_processes.py -q`; expect missing implementation failures.
 - [x] Implement one process registry with asyncio lock and completion queue; connect Bash/input/stop tool wrappers. Use process group termination and bounded output previews.
 - [x] Run task tests and full current suite; commit.
 
 ### Task 3: Context pipeline
 
-**Files:** src/mini_harness/context.py, prompts.py; tests/test_context.py
-**Interfaces:** ContextPolicy(window, reserve, auto_buffer, block_buffer, keep_rounds, micro_trigger, micro_keep, notes), ContextMiddleware(session, model, policy), async compact(messages, instructions='', start=None, end=None), update_notes(messages), prepare(messages), cleanup().
+**Files:** src/mini_harness/context.py, compact.py, prompts.py; tests/test_context.py
+**Interfaces:** ContextPolicy(window, reserve, auto_buffer, block_buffer, keep_rounds, micro_keep_rounds, micro_keep_tokens, micro_min_savings, micro_idle_seconds, notes), ContextMiddleware(session, model, policy), async compact(messages, instructions='', start=None, end=None), update_notes(messages), prepare(messages), cleanup().
 
 - [x] Write tests: Micro preserves recent results and original transcript; full tool groups remain together; auto summary commits only on success; notes reuse retains uncovered tail; stale background update rejected; summary window includes output reserve; partial compact preserves outside segment; explicit overflow gets bounded recovery; ordinary error does not retry; three failures trip breaker.
 - [x] Run `uv run pytest tests/test_context.py -q`; expect missing implementation failures.
-- [x] Implement local token budgeting and one shared compact path; use model response state override for reactive recovery after inspecting installed middleware API. Persist messages and note coverage together via graph state or versioned metadata.
+- [x] Implement local token budgeting and shared summary path for Auto/manual compaction. Reactive overflow uses rule-based oldest-group trimming without summarization and persists successful recovery through model response state override. Persist messages and note coverage together via graph state or versioned metadata.
 - [x] Run task tests and full current suite; commit.
 
 ### Task 4: Graph and CLI integration
 
 **Files:** src/mini_harness/agent.py, cli.py, __main__.py; tests/test_agent_cli.py; README.md
-**Interfaces:** Harness.open(cwd, directory, model, policy, env_file=None), async stream(text), compact(instructions, start, end), close(); command mini-harness --model provider:model [-p prompt] [--resume id] [--session-dir dir].
+**Interfaces:** Harness.open(cwd, directory, model, policy=None, max_steps=200, process_timeout=3600), async stream(text), compact(instructions, start, end), close(); command mini-harness --model provider:model [-p prompt] [--resume id] [--session-dir dir].
 
-- [x] Write offline real-create_agent integration tests using a scripted BaseChatModel: read/edit/bash round-trip; reopen checkpoint continues compressed conversation; persisted tool result is reused; unknown execution never repeats; background completion reaches next model request; --help and missing model configuration return useful results.
+- [x] Write offline real-create_agent integration tests using a scripted BaseChatModel: read/edit/bash round-trip; reopen checkpoint continues compressed conversation; recovery restores persisted tool results without rerunning tools; interrupted execution is an error; background completion reaches next model request; --help and missing model configuration return useful results.
 - [x] Run `uv run pytest tests/test_agent_cli.py -q`; expect missing implementation failures.
 - [x] Implement async SQLite checkpointer lifecycle and streaming CLI, input() on a daemon reader thread, /compact, /tasks, /sessions, /exit, cancellation, model/provider configuration, docs with exact commands.
 - [x] Run `uv run pytest -q`, `uv run ruff check .`, `uv run mini-harness --help`, and compile checks. Review full branch for unnecessary layers and missing failure paths; fix important findings with reproducing tests.
@@ -81,7 +81,9 @@ and fixed in one pass:
    bounded batches and merge prior summaries. A single unfit round fails without committing a new
    context or coverage boundary. Both local budget and provider overflow paths have regression tests.
 
-An additional recovery regression normalizes env_file to an absolute path before saving settings.
+Environment setup was subsequently simplified to a single env.sh per session: the file is created
+automatically, its absolute path and loading rules are supplied to the model, and edits persist
+across commands, directory changes and resume. The custom environment-file selector was removed.
 The local HTTP/SSE test exercises the real OpenAI adapter, CLI, tool calls, stream text and resume.
 
 Final validation: `uv run pytest -q` → **39 passed**; `uv run ruff check .` → passed;

@@ -1,172 +1,163 @@
-"""Assembly and lifecycle. LangChain owns the model/tool loop."""
+"""资源生命周期与会话接口；显式循环见 graph/builder.py。"""
 
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
     ToolMessage,
-    message_to_dict,
     messages_from_dict,
 )
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from .context import ContextMiddleware, ContextPolicy, estimate_tokens
-from .processes import ProcessManager
-from .prompts import SYSTEM_PROMPT
+from .context.compact import estimate_tokens
+from .context.manager import ContextManager
+from .context.policy import ContextPolicy
+from .graph.builder import build_graph
+from .graph.nodes import INTERRUPTED_TOOL
+from .graph.types import Resources
+from .prompts import load_prompt
 from .session import Session
-from .tools import create_tools
-
-
-class ExecutionMiddleware(AgentMiddleware):
-    """Durable tool results close the gap between OS side effects and checkpoints."""
-
-    def __init__(self, session, processes, context, tool_tokens):
-        self.session, self.processes, self.context = session, processes, context
-        self.tool_tokens = tool_tokens
-
-    def system_message(self):
-        root = Path(self.session.get("project_root"))
-        instructions = root / "AGENTS.md"
-        text = SYSTEM_PROMPT + f"\nProject root: {root}\nCurrent directory: {self.session.cwd}\n"
-        if instructions.is_file():
-            text += "\nProject instructions:\n" + instructions.read_text(encoding="utf-8")
-        return SystemMessage(content=text)
-
-    async def abefore_model(self, state, runtime):
-        self.context.overhead = estimate_tokens([self.system_message()]) + self.tool_tokens
-        messages = []
-        for event in self.processes.drain_events():
-            message = HumanMessage(
-                content="[Internal background task event]\n" + json.dumps(event), id=str(uuid4())
-            )
-            self.session.record_message(message)
-            messages.append(message)
-        return {"messages": messages} if messages else None
-
-    async def awrap_model_call(self, request, handler):
-        return await handler(request.override(system_message=self.system_message()))
-
-    async def awrap_tool_call(self, request, handler):
-        call_id = request.tool_call["id"]
-        previous = self.session.execution(call_id)
-        if previous:
-            if previous[0] == "done":
-                return messages_from_dict([previous[1]])[0]
-            return ToolMessage(
-                content="Previous execution result is unknown. Inspect files/logs; "
-                "this command was not repeated.",
-                tool_call_id=call_id,
-                id=f"result-{call_id}",
-                status="error",
-            )
-        self.session.start_execution(call_id)
-        try:
-            result = await handler(request)
-        except Exception as error:
-            result = ToolMessage(
-                content=f"{type(error).__name__}: {error}", tool_call_id=call_id, status="error"
-            )
-        result.id = result.id or f"result-{call_id}"
-        self.session.finish_execution(call_id, message_to_dict(result))
-        self.session.record_message(result)
-        return result
+from .tools.factory import create_tools
+from .tools.permissions import Permissions
+from .tools.processes import ProcessManager
 
 
 class Harness:
-    def __init__(self, session, processes, model, policy, saver, max_steps):
+    def __init__(self, session, processes, model, policy, checkpointer, max_steps, approve=None):
         self.session, self.processes = session, processes
-        self.context = ContextMiddleware(session, model, policy)
+        self.context = ContextManager(session, model, policy)
         tools = create_tools(session, processes)
-        tool_tokens = sum(len(json.dumps(t.args).encode()) // 3 + 100 for t in tools)
-        self.execution = ExecutionMiddleware(session, processes, self.context, tool_tokens)
-        self.graph = create_agent(
-            model=model, tools=tools, checkpointer=saver, middleware=[self.execution, self.context]
+        tool_tokens = sum(len(json.dumps(tool.args).encode()) // 3 + 100 for tool in tools)
+        system_message = SystemMessage(
+            content=load_prompt("system")
+            + (
+                f"\nProject root: {session.get('project_root')}\n"
+                f"Environment file: {processes.env_file}\n"
+            )
         )
+        self.context.overhead_tokens = estimate_tokens([system_message]) + tool_tokens
+        self.permissions = Permissions(session, approve)
+        self.resources = Resources(
+            session=session,
+            processes=processes,
+            context_manager=self.context,
+            permissions=self.permissions,
+            model=model.bind_tools(tools),
+            tools={tool.name: tool for tool in tools},
+            system_message=system_message,
+        )
+        self.graph = build_graph(checkpointer)
         self.config = {"configurable": {"thread_id": session.id}, "recursion_limit": max_steps}
 
     @classmethod
     @asynccontextmanager
     async def open(
-        cls, cwd, directory, model, policy=None, env_file=None, max_steps=200, process_timeout=3600
+        cls, cwd, session_dir, model, policy=None,
+        max_steps=1000, process_timeout=3600, approve=None,
     ):
-        with Session(Path(directory), Path(cwd)) as session:
-            async with ProcessManager(session, env_file, process_timeout) as processes:
-                async with AsyncSqliteSaver.from_conn_string(str(session.database)) as saver:
-                    harness = cls(
-                        session, processes, model, policy or ContextPolicy(), saver, max_steps
-                    )
-                    try:
-                        yield harness
-                    finally:
-                        await harness.context.close()
+        """打开会话；cwd 是首次工作目录，session_dir 保存会话数据。
 
-    def pending_results(self, messages):
-        completed = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
-        results = []
+        max_steps 按图节点计数；process_timeout 单位为秒；approve 是异步审批回调。
+        """
+        with Session(Path(session_dir), Path(cwd)) as session:
+            async with ProcessManager(session, max_runtime_seconds=process_timeout) as processes:
+                async with AsyncSqliteSaver.from_conn_string(str(session.database)) as checkpointer:
+                    harness = cls(
+                        session,
+                        processes,
+                        model,
+                        policy or ContextPolicy(),
+                        checkpointer,
+                        max_steps,
+                        approve,
+                    )
+                    yield harness
+
+    def recover_missing_tool_results(self, messages):
+        """补齐中断时缺失的工具结果，复用执行记录，不重新执行工具。"""
+        completed_call_ids = {
+            message.tool_call_id for message in messages if isinstance(message, ToolMessage)
+        }
+        recovered_results = []
         for message in messages:
             if not isinstance(message, AIMessage):
                 continue
-            for call in message.tool_calls:
-                if call["id"] in completed:
+            for tool_call in [*message.tool_calls, *message.invalid_tool_calls]:
+                if tool_call["id"] in completed_call_ids:
                     continue
-                saved = self.session.execution(call["id"])
-                if saved and saved[0] == "done":
-                    result = messages_from_dict([saved[1]])[0]
+                execution_record = self.session.get_execution(tool_call["id"])
+                if execution_record and execution_record[1] is not None:
+                    result = messages_from_dict([execution_record[1]])[0]
                 else:
                     result = ToolMessage(
-                        content="Execution interrupted; result unknown. Inspect state before retry."
-                        if saved
+                        content=INTERRUPTED_TOOL
+                        if execution_record
                         else "Call canceled before execution; it was not run.",
-                        tool_call_id=call["id"],
-                        id=f"result-{call['id']}",
+                        tool_call_id=tool_call["id"],
+                        id=f"result-{tool_call['id']}",
                         status="error",
                     )
-                results.append(result)
-        return results
+                recovered_results.append(result)
+        return recovered_results
 
-    async def stream(self, text: str | None):
+    async def events(self, user_input: str | None):
+        """接收本次用户输入并产生事件；user_input=None 时仅处理已有会话。"""
         snapshot = await self.graph.aget_state(self.config)
-        messages = self.pending_results(snapshot.values.get("messages", []))
-        if text is not None:
-            messages.append(HumanMessage(content=text, id=str(uuid4())))
-        async for chunk, metadata in self.graph.astream(
-            {"messages": messages},
+        messages = self.recover_missing_tool_results(snapshot.values.get("messages", []))
+        if user_input is not None:
+            messages.append(HumanMessage(content=user_input, id=f"user-{uuid4()}"))
+        async for stream_mode, stream_data in self.graph.astream(
+            {
+                "messages": messages,
+                "pending_calls": [],
+                "approved": False,
+                "repair_attempts": 0,
+                "next": "",
+            },
             self.config,
-            stream_mode="messages",
+            context=self.resources,
+            stream_mode=["messages", "custom"],
             durability="sync",
         ):
-            if (
-                metadata.get("langgraph_node") == "model"
-                and isinstance(chunk, AIMessage)
-                and chunk.text
-            ):
-                yield chunk.text
+            if stream_mode == "custom":
+                yield stream_data
+            else:
+                chunk, metadata = stream_data
+                if (
+                    metadata.get("langgraph_node") == "model"
+                    and isinstance(chunk, AIMessage)
+                    and chunk.text
+                ):
+                    yield {"type": "text", "text": chunk.text}
+        yield {"type": "done"}
 
-    async def compact(self, instructions="", start=None, end=None):
+    async def stream(self, user_input: str | None):
+        """保留只读取模型正文的简单接口。"""
+        async for event in self.events(user_input):
+            if event["type"] == "text":
+                yield event["text"]
+
+    async def compact(self, instructions="", start_group=None, end_group=None):
+        """手动压缩；instructions 是摘要侧重点，组索引从 0 开始，范围左闭右开。"""
         snapshot = await self.graph.aget_state(self.config)
         messages = snapshot.values.get("messages", [])
         if not messages:
             raise ValueError("There are no messages to compact")
-        if self.pending_results(messages):
+        if self.recover_missing_tool_results(messages):
             raise ValueError("Finish or recover interrupted tool calls before compacting")
-        self.context.overhead = (
-            estimate_tokens([self.execution.system_message()]) + self.execution.tool_tokens
-        )
-        result = await self.context.compact(messages, instructions, start, end)
+        result = await self.context.compact(messages, instructions, start_group, end_group)
         await self.graph.aupdate_state(
             self.config,
             {
                 "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *result],
             },
-            as_node="ContextMiddleware.before_model",
+            as_node="compact",
         )
         return result
