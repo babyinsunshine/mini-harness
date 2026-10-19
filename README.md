@@ -57,7 +57,7 @@ uv run mini-harness --model 'openai:YOUR_MODEL_ID' --base-url 'https://YOUR_ENDP
 
 | 处理 | 默认规则 |
 | --- | --- |
-| 允许 | 项目和当前会话目录内的普通文件读写；受限参数的简单只读命令；停止本会话任务 |
+| 允许 | 项目和当前会话目录内的普通文件读写；受限参数的简单只读命令；停止本会话任务；更新计划 |
 | 询问 | 目录外访问、修改 `env.sh` / `.git` 配置、删除文件、脚本、安装、联网、stdin 写入、未知工具或复杂 Shell |
 | 拒绝 | 明确识别的 `rm -rf`、格式化/写磁盘设备、关机、破坏性 Git 操作、关键系统路径写入，以及改写会话数据库或原始记录 |
 
@@ -133,6 +133,32 @@ uv run mini-harness --model 'openai:deepseek-flash' --base-url 'https://api.deep
 系统提示在会话组装时固定，包含核心规则、项目根目录和环境文件路径。
 当前工作目录和根目录 `AGENTS.md` 会在调用模型前检查，首次或内容变化时追加运行上下文
 消息；不改写之前的消息，保留普通工具循环中的请求前缀。压缩后会补齐最新运行上下文。
+
+## 任务计划
+
+模型用一个普通工具 `update_plan(plan, explanation=None)` 维护当前任务的步骤清单。
+多步骤任务按需使用，简单任务跳过；工具只记录计划，不调度或执行步骤。
+每次提交完整列表，替换该 session 的当前清单；传入 `[]` 清空：
+
+```json
+{
+  "plan": [
+    {"step": "阅读相关代码", "status": "completed"},
+    {"step": "实现修改", "status": "in_progress"},
+    {"step": "运行测试", "status": "pending"}
+  ],
+  "explanation": "根据代码结构补充测试步骤"
+}
+```
+
+步骤文字不能为空，状态只有 `pending`、`in_progress`、`completed`，最多一步进行中。
+错误参数返回工具错误，保留原计划。更新计划直接允许，不额外询问执行权限。
+
+最新清单和可选说明保存在当前会话的 `runtime.sqlite`，使用 metadata 的 `plan` 键；
+每次更新向 `transcript.jsonl` 追加 `plan` 记录。不同 session 的清单相互独立。
+运行上下文消息带上最新计划，只在内容变化或上下文缺失时追加，不改写系统提示和旧消息。
+Micro 不裁剪运行上下文；摘要后重建最新计划，Reactive 保留最新运行上下文，恢复会话时同样读取。
+CLI 复用 `tool_end` 事件显示 `[ ]` / `[>]` / `[x]` 和完成数量，不增加图节点或事件类型。
 
 ## Skills
 
@@ -287,6 +313,7 @@ src/mini_harness/
 ├── tools/
 │   ├── factory.py       # 显式列出模型可调用的工具
 │   ├── files.py         # 文件读取、写入、精确替换
+│   ├── plan.py          # 单会话当前计划的校验、整表更新与保存
 │   ├── skills.py        # 按需列出项目技能、加载指令与资源路径
 │   ├── processes.py     # Bash、cwd、stdin、后台任务与清理
 │   └── permissions.py   # allow / ask / deny 与单次审批
@@ -325,7 +352,7 @@ CLI 将模型正文输出到 stdout，模型请求、工具开始/结果、后�
 工具事件带调用 ID，结束事件带退出码；Bash 非零退出会记录为 error。
 请求失败时 CLI 显示异常及其底层原因，便于定位代理、DNS 或连接问题。
 
-子 agent、MCP、任务/计划、长期记忆和 hooks 的具体方案继续逐模块讨论，
+子 agent、MCP、任务依赖与认领、长期记忆和 hooks 的具体方案继续逐模块讨论，
 当前没有为它们增加占位实现或通用插件框架。
 
 ## 验证

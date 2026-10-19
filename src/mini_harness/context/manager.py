@@ -1,5 +1,6 @@
 """普通上下文服务：请求前压缩、手动压缩和一次超限恢复。"""
 
+import json
 from pathlib import Path
 from time import time
 from uuid import uuid4
@@ -127,7 +128,7 @@ class ContextManager:
         return result
 
     def with_runtime_context(self, messages):
-        """cwd 或根目录指令变化时追加消息，复用未变的请求前缀。"""
+        """cwd、项目指令或当前计划变化时追加消息，复用未变的请求前缀。"""
         instructions_path = Path(self.session.get("project_root")) / "AGENTS.md"
         runtime_text = (
             f"[Runtime context]\nCurrent directory: {self.session.cwd}\nProject instructions:\n"
@@ -136,6 +137,9 @@ class ContextManager:
                 if instructions_path.is_file() else "(none)"
             )
         )
+        # 计划放在已有运行上下文中；摘要后可重建，Reactive 也会保留最新一条。
+        if plan := self.session.get("plan"):
+            runtime_text += "\nCurrent plan:\n" + json.dumps(plan, ensure_ascii=False)
         previous_context = next(
             (
                 message for message in reversed(messages)
