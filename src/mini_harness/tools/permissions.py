@@ -56,6 +56,8 @@ def classify(tool_call: dict, session: Session) -> tuple[str, str]:
     name, args = tool_call["name"], tool_call.get("args", {})
     if name in {"read_file", "write_file", "edit_file"}:
         return _file_rule(args.get("path"), session, writing=name != "read_file")
+    if name == "update_plan":
+        return "allow", "Update this session's task plan"
     if name == "list_skills":
         return "allow", "Read project skill descriptions"
     if name == "load_skill":

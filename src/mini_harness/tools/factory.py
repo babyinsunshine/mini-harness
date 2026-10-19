@@ -1,14 +1,25 @@
-"""将文件、进程和 skill 操作绑定成模型工具，新增工具从这里接入。"""
+"""将文件、进程、计划和 skill 操作绑定成模型工具，新增工具从这里接入。"""
 
 from langchain_core.tools import tool
 
 from ..session import Session
 from .files import edit_file, read_file, write_file
+from .plan import PlanStep, update_plan
 from .skills import list_skills, load_skill
 
 
 def create_tools(session: Session, processes):
     """绑定会话资源；工具名和参数直接构成模型看到的调用协议。"""
+    @tool("update_plan")
+    async def update_plan_tool(plan: list[PlanStep], explanation: str | None = None) -> dict:
+        """Replace the current task plan with the full list of steps and their statuses.
+
+        Use for multi-step work, and update progress as you go. Skip simple tasks.
+        At most one step may be in_progress. Pass [] to clear the plan.
+        explanation optionally describes why the plan changed.
+        """
+        return update_plan(session, plan, explanation)
+
     @tool("list_skills")
     async def list_skills_tool() -> list[dict]:
         """Discover project skills and their descriptions before choosing one to load."""
@@ -66,5 +77,5 @@ def create_tools(session: Session, processes):
 
     return [
         bash, read_file_tool, write_file_tool, edit_file_tool, send_input, stop_task,
-        list_skills_tool, load_skill_tool,
+        list_skills_tool, load_skill_tool, update_plan_tool,
     ]

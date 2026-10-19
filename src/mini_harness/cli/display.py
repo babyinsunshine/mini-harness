@@ -39,6 +39,15 @@ def format_event(event) -> str:
     except (ValueError, TypeError):
         parsed_output = {}
     output_details = parsed_output if isinstance(parsed_output, dict) else {}
+    if event["name"] == "update_plan" and event["status"] == "success":
+        plan = output_details["plan"]
+        completed = sum(item["status"] == "completed" for item in plan)
+        parts = [f"[plan] {completed}/{len(plan)} completed"]
+        if explanation := output_details.get("explanation"):
+            parts.append(explanation)
+        markers = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]"}
+        parts.extend(f"{markers[item['status']]} {item['step']}" for item in plan)
+        return "\n".join(parts)
     preview = str(output_details.get("output", output_details.get("preview", tool_output)))
     # Bash 的最后几行通常最有价值；文件内容从选区开头展示。
     lines = preview.splitlines()
