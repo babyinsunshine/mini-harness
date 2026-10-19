@@ -57,6 +57,15 @@ def flatten_groups(groups: list[list[AnyMessage]]) -> list[AnyMessage]:
     return [message for group in groups for message in group]
 
 
+def has_skill_instructions(group: list[AnyMessage]) -> bool:
+    """成功加载的技能是工作指令；保护整组以保持工具调用配对。"""
+    return any(
+        isinstance(message, ToolMessage)
+        and message.name == "load_skill" and message.status == "success"
+        for message in group
+    )
+
+
 def micro_compact(
     messages: list[AnyMessage], session: Session, policy: ContextPolicy, *, idle: bool = False
 ) -> list[AnyMessage]:
@@ -67,6 +76,8 @@ def micro_compact(
     savings = 0
     tool_rounds = 0
     for group in reversed(group_messages(messages)):
+        if has_skill_instructions(group):
+            continue
         outputs = [m for m in group if isinstance(m, ToolMessage)]
         if not outputs:
             continue
@@ -140,22 +151,24 @@ def split_for_summary(
     start_group: int | None = None,
     end_group: int | None = None,
 ) -> tuple[list[AnyMessage], list[AnyMessage], list[AnyMessage]]:
-    """返回前段、摘要段、后段；组索引从 0 开始，end_group 不包含在范围内。"""
+    """返回前段、摘要段、保留段（含技能组）；组索引左闭右开。"""
     groups = group_messages(messages)
     if start_group is not None or end_group is not None:
         first = start_group or 0
         last = len(groups) if end_group is None else end_group
         if not 0 <= first < last <= len(groups):
             raise ValueError(f"Expected round range 0 <= start < end <= {len(groups)}")
-        return (
-            flatten_groups(groups[:first]),
-            flatten_groups(groups[first:last]),
-            flatten_groups(groups[last:]),
-        )
-    keep = min(keep_rounds, max(0, len(groups) - 1))
-    selected = flatten_groups(groups[:-keep] if keep else groups)
-    recent = flatten_groups(groups[-keep:]) if keep else []
-    return [], selected, recent
+    else:
+        keep = min(keep_rounds, max(0, len(groups) - 1))
+        first, last = 0, len(groups) - keep
+    selected = groups[first:last]
+    protected = [group for group in selected if has_skill_instructions(group)]
+    summarized = [group for group in selected if not has_skill_instructions(group)]
+    return (
+        flatten_groups(groups[:first]),
+        flatten_groups(summarized),
+        flatten_groups([*protected, *groups[last:]]),
+    )
 
 
 def restore_recent_files(
@@ -247,7 +260,8 @@ def reactive_compact(
     remaining = before + estimate_tokens([notice])
     kept = []
     for group in groups:
-        if remaining > target and not any(m.id in protected for m in group):
+        is_protected = has_skill_instructions(group) or any(m.id in protected for m in group)
+        if remaining > target and not is_protected:
             remaining -= estimate_tokens(group)
         else:
             kept.extend(group)
