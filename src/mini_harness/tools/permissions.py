@@ -25,18 +25,21 @@ READ_FLAGS = {
 class Permissions:
     """先审批再进入执行记录；approve 由 CLI 提供，缺省时不执行需要审批的操作。"""
 
-    def __init__(self, session: Session, approve=None):
+    def __init__(self, session: Session, approve=None, parent=None):
         self.session, self.approve = session, approve
+        self.parent = parent
         self.session_trusted = False  # 只保存在内存，恢复会话时重新审批。
 
     async def check(self, tool_call):
         """允许时返回 None；拒绝时返回未执行的 ToolMessage。"""
         action, reason = classify(tool_call, self.session)
         allowed = action == "allow"
-        if action == "ask" and self.session_trusted:
+        authority = self.parent or self
+        if action == "ask" and authority.session_trusted:
             allowed = True
-        elif action == "ask" and self.approve is not None:
-            allowed = await self.approve(tool_call, reason)
+        elif action == "ask" and authority.approve is not None:
+            request = {**tool_call, "agent_id": self.session.id} if self.parent else tool_call
+            allowed = await authority.approve(request, reason)
         self.session.record(
             "permission", call_id=tool_call["id"], action=action, allowed=allowed, reason=reason
         )
@@ -58,6 +61,8 @@ def classify(tool_call: dict, session: Session) -> tuple[str, str]:
         return _file_rule(args.get("path"), session, writing=name != "read_file")
     if name == "update_plan":
         return "allow", "Update this session's task plan"
+    if name in {"spawn_agent", "wait_agent", "continue_agent", "close_agent"}:
+        return "allow", "Manage subagents owned by this session"
     if name == "list_skills":
         return "allow", "Read project skill descriptions"
     if name == "load_skill":

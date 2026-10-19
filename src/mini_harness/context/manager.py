@@ -140,6 +140,12 @@ class ContextManager:
         # 计划放在已有运行上下文中；摘要后可重建，Reactive 也会保留最新一条。
         if plan := self.session.get("plan"):
             runtime_text += "\nCurrent plan:\n" + json.dumps(plan, ensure_ascii=False)
+        if agents := self.session.get("subagents"):
+            active = [
+                {key: agent[key] for key in ("agent_id", "status", "session_dir")}
+                for agent in agents.values() if agent["status"] != "closed"
+            ]
+            runtime_text += "\nSubagents:\n" + json.dumps(active, ensure_ascii=False)
         previous_context = next(
             (
                 message for message in reversed(messages)
