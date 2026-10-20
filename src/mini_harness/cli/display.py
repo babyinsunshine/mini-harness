@@ -17,7 +17,9 @@ def format_event(event) -> str:
         return "[model] " + " · ".join(details)
     if event_type == "tool_start":
         tool_args = event["args"]
-        target = tool_args.get("command", tool_args.get("path", tool_args.get("task_id", "")))
+        target = tool_args.get("command", tool_args.get("path", tool_args.get(
+            "task_id", tool_args.get("agent_id", tool_args.get("task", ""))
+        )))
         return f"[tool] {event['name']}: {str(target)[:160]}"
     if event_type == "tool_denied":
         return f"[denied] {event['name']}: {event['reason']}"
@@ -29,6 +31,8 @@ def format_event(event) -> str:
         return f"[context] {event['before']:,} → {event['after']:,} estimated tokens"
     if event_type == "background":
         task = event["task"]
+        if "agent_id" in task:
+            return f"[agent] {task['agent_id']}: {task['status']}"
         return f"[task] {task['task_id']}: {task['status']} (exit {task['exit_code']})"
     if event_type != "tool_end":
         return ""

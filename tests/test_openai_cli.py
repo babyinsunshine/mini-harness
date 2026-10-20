@@ -11,25 +11,29 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    "outside, broken",
+    "outside, broken, full_access",
     [
-        (False, None),
-        (True, None),
-        (False, "length"),
-        (False, "invalid"),
-        (False, "partial-normal"),
-        (False, "partial-missing"),
+        (False, None, False),
+        (True, None, False),
+        (True, None, True),
+        (False, "length", False),
+        (False, "invalid", False),
+        (False, "partial-normal", False),
+        (False, "partial-missing", False),
     ],
     ids=[
         "project-write",
         "approval-denied",
+        "full-access",
         "truncated",
         "malformed",
         "partial-normal",
         "partial-missing",
     ],
 )
-def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_path, outside, broken):
+def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(
+    tmp_path, outside, broken, full_access,
+):
     pytest.importorskip("langchain_openai")
     requests = []
 
@@ -120,6 +124,7 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_pat
         result = subprocess.run(
             [
                 *command,
+                *(["--full-access"] if full_access else []),
                 "--cwd",
                 str(project),
                 "--model",
@@ -137,13 +142,15 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(tmp_pat
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "Local verified"
         assert "700 in / 50 out" in result.stderr
-        if outside or broken:
+        if (outside and not full_access) or broken:
             assert not (tmp_path / "outside.txt").exists()
             assert not (project / "smoke.txt").exists()
             assert any(
                 message["role"] == "tool" and "not executed" in message["content"]
                 for message in requests[-1]["messages"]
             )
+        elif full_access:
+            assert (tmp_path / "outside.txt").read_text() == "working\n"
         else:
             assert (project / "smoke.txt").read_text() == "working\n"
         session_id = next(root.iterdir()).name

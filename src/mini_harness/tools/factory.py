@@ -3,12 +3,13 @@
 from langchain_core.tools import tool
 
 from ..session import Session
+from .agents import create_agent_tools
 from .files import edit_file, read_file, write_file
 from .plan import PlanStep, update_plan
 from .skills import list_skills, load_skill
 
 
-def create_tools(session: Session, processes):
+def create_tools(session: Session, processes, subagents=None, *, include_plan=True):
     """绑定会话资源；工具名和参数直接构成模型看到的调用协议。"""
     @tool("update_plan")
     async def update_plan_tool(plan: list[PlanStep], explanation: str | None = None) -> dict:
@@ -75,7 +76,12 @@ def create_tools(session: Session, processes):
         """Stop a background command and its child processes."""
         return await processes.stop_task(task_id)
 
-    return [
+    tools = [
         bash, read_file_tool, write_file_tool, edit_file_tool, send_input, stop_task,
-        list_skills_tool, load_skill_tool, update_plan_tool,
+        list_skills_tool, load_skill_tool,
     ]
+    if include_plan:
+        tools.append(update_plan_tool)
+    if subagents is not None:
+        tools.extend(create_agent_tools(subagents))
+    return tools

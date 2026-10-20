@@ -1,5 +1,6 @@
 """资源生命周期与会话接口；显式循环见 graph/builder.py。"""
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,26 +25,40 @@ from .graph.nodes import INTERRUPTED_TOOL
 from .graph.types import Resources
 from .prompts import load_prompt
 from .session import Session
+from .subagents import SubagentManager
 from .tools.factory import create_tools
 from .tools.permissions import Permissions
 from .tools.processes import ProcessManager
 
 
 class Harness:
-    def __init__(self, session, processes, model, policy, checkpointer, max_steps, approve=None):
+    def __init__(
+        self, session, processes, model, policy, checkpointer, max_steps,
+        approve=None, process_timeout=3600, parent_permissions=None, full_access=False,
+    ):
         self.session, self.processes = session, processes
         self.context = ContextManager(session, model, policy)
-        tools = create_tools(session, processes)
+        self.permissions = Permissions(
+            session, approve, parent_permissions, full_access=full_access,
+        )
+        is_child = session.get("parent_session_id") is not None
+        self.subagents = None if is_child else SubagentManager(self, max_steps, process_timeout)
+        tools = create_tools(session, processes, self.subagents, include_plan=not is_child)
         tool_tokens = sum(len(json.dumps(tool.args).encode()) // 3 + 100 for tool in tools)
         system_message = SystemMessage(
             content=load_prompt("system")
+            + load_prompt("subagent" if is_child else "main")
             + (
-                f"\nProject root: {session.get('project_root')}\n"
+                f"\nSession ID: {session.id}\nProject root: {session.get('project_root')}\n"
                 f"Environment file: {processes.env_file}\n"
             )
         )
+        if is_child:
+            system_message.content += (
+                f"Parent session ID: {session.get('parent_session_id')}\n"
+                f"Parent session directory: {session.get('parent_session_dir')}\n"
+            )
         self.context.overhead_tokens = estimate_tokens([system_message]) + tool_tokens
-        self.permissions = Permissions(session, approve)
         self.resources = Resources(
             session=session,
             processes=processes,
@@ -61,12 +76,19 @@ class Harness:
     async def open(
         cls, cwd, session_dir, model, policy=None,
         max_steps=1000, process_timeout=3600, approve=None,
+        parent_session=None, parent_permissions=None, full_access=False,
     ):
         """打开会话；cwd 是首次工作目录，session_dir 保存会话数据。
 
         max_steps 按图节点计数；process_timeout 单位为秒；approve 是异步审批回调。
+        parent_session / parent_permissions 仅供子智能体继承父身份与审批入口。
+        full_access 显式跳过工具权限规则；子智能体沿用父权限。
         """
         with Session(Path(session_dir), Path(cwd)) as session:
+            if parent_session is not None:
+                session.set("parent_session_id", parent_session.id)
+                session.set("parent_session_dir", str(parent_session.directory))
+                session.set("project_root", parent_session.get("project_root"))
             async with ProcessManager(session, max_runtime_seconds=process_timeout) as processes:
                 async with AsyncSqliteSaver.from_conn_string(str(session.database)) as checkpointer:
                     harness = cls(
@@ -76,9 +98,19 @@ class Harness:
                         policy or ContextPolicy(),
                         checkpointer,
                         max_steps,
-                        approve,
+                        approve=approve,
+                        process_timeout=process_timeout,
+                        parent_permissions=parent_permissions,
+                        full_access=full_access,
                     )
-                    yield harness
+                    try:
+                        yield harness
+                    finally:
+                        if harness.subagents is not None:
+                            await harness.subagents.interrupt()
+                        # 取消图后仍可能写入取消记录；先等写入结束，再关闭 SQLite。
+                        async with checkpointer.lock:
+                            pass
 
     def recover_missing_tool_results(self, messages):
         """补齐中断时缺失的工具结果，复用执行记录，不重新执行工具。"""
@@ -107,35 +139,49 @@ class Harness:
                 recovered_results.append(result)
         return recovered_results
 
-    async def events(self, user_input: str | None):
-        """接收本次用户输入并产生事件；user_input=None 时仅处理已有会话。"""
+    async def events(self, user_input: str | None, *, input_id: str | None = None):
+        """接收本次用户输入并产生事件；user_input=None 时仅处理已有会话。
+
+        input_id 用于子任务恢复去重；已接收的相同 ID 只继续上下文，不重发指令。
+        """
+        if self.subagents is not None:
+            self.subagents.resume_interrupted()
         snapshot = await self.graph.aget_state(self.config)
         messages = self.recover_missing_tool_results(snapshot.values.get("messages", []))
-        if user_input is not None:
-            messages.append(HumanMessage(content=user_input, id=f"user-{uuid4()}"))
-        async for stream_mode, stream_data in self.graph.astream(
-            {
-                "messages": messages,
-                "pending_calls": [],
-                "approved": False,
-                "repair_attempts": 0,
-                "next": "",
-            },
-            self.config,
-            context=self.resources,
-            stream_mode=["messages", "custom"],
-            durability="sync",
-        ):
-            if stream_mode == "custom":
-                yield stream_data
-            else:
-                chunk, metadata = stream_data
-                if (
-                    metadata.get("langgraph_node") == "model"
-                    and isinstance(chunk, AIMessage)
-                    and chunk.text
-                ):
-                    yield {"type": "text", "text": chunk.text}
+        last_input_id = snapshot.values.get("last_user_input_id", "")
+        # 消息可能已被摘要替换，是否接收过输入要看检查点字段，不能只查消息 ID。
+        if user_input is not None and (input_id is None or input_id != last_input_id):
+            last_input_id = input_id or f"user-{uuid4()}"
+            messages.append(HumanMessage(content=user_input, id=last_input_id))
+        try:
+            async for stream_mode, stream_data in self.graph.astream(
+                {
+                    "messages": messages,
+                    "pending_calls": [],
+                    "approved": False,
+                    "repair_attempts": 0,
+                    "next": "",
+                    "last_user_input_id": last_input_id,
+                },
+                self.config,
+                context=self.resources,
+                stream_mode=["messages", "custom"],
+                durability="sync",
+            ):
+                if stream_mode == "custom":
+                    yield stream_data
+                else:
+                    chunk, metadata = stream_data
+                    if (
+                        metadata.get("langgraph_node") == "model"
+                        and isinstance(chunk, AIMessage)
+                        and chunk.text
+                    ):
+                        yield {"type": "text", "text": chunk.text}
+        except asyncio.CancelledError:
+            if self.subagents is not None:
+                await self.subagents.interrupt()
+            raise
         yield {"type": "done"}
 
     async def stream(self, user_input: str | None):

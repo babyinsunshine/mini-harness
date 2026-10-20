@@ -77,9 +77,15 @@ uv run mini-harness --model 'openai:YOUR_MODEL_ID' --base-url 'https://YOUR_ENDP
 程序调用 `Harness.open(..., approve=callback)` 可以提供异步 `(tool_call, reason) -> bool` 回调；
 省略回调时也不会自动放行需要审批的调用。审批前不记录 `started`，恢复会话时仍按原规则补齐工具结果。
 
+添加 `--full-access` 启用完全访问：所有工具调用直接放行，包括默认规则中的拒绝项，
+主智能体与子智能体均不询问审批；权限与工具执行日志照常记录。
+此开关只对本次启动生效，恢复会话时需再次传入。程序调用可使用 `Harness.open(..., full_access=True)`。
+
 ```bash
 # 单次任务
 uv run mini-harness --model 'anthropic:YOUR_MODEL_ID' -p '查看项目并解释测试入口'
+# 完全访问，无需审批
+uv run mini-harness --model 'anthropic:YOUR_MODEL_ID' --full-access
 # 查看和恢复会话
 uv run mini-harness --list-sessions
 uv run mini-harness --resume SESSION_ID
@@ -159,6 +165,45 @@ uv run mini-harness --model 'openai:deepseek-flash' --base-url 'https://api.deep
 运行上下文消息带上最新计划，只在内容变化或上下文缺失时追加，不改写系统提示和旧消息。
 Micro 不裁剪运行上下文；摘要后重建最新计划，Reactive 保留最新运行上下文，恢复会话时同样读取。
 CLI 复用 `tool_end` 事件显示 `[ ]` / `[>]` / `[x]` 和完成数量，不增加图节点或事件类型。
+
+## 子智能体
+
+主模型通过四个普通工具委派工作，不增加图节点：
+
+| 工具 | 用途 |
+| --- | --- |
+| `spawn_agent(task, timeout=600)` | 新建独立子 Session，立即返回 `agent_id` |
+| `wait_agent(agent_id)` | 等待当前轮结束，或读取已经保存的结果 |
+| `continue_agent(agent_id, message, timeout=None)` | 在原对话中继续；重新计时，缺省沿用原时限 |
+| `close_agent(agent_id)` | 停止运行并关闭子智能体，保留记录 |
+
+子智能体与主智能体在同一 Python 进程中，通过 `asyncio.Task` 并行等待模型和工具。
+模型配置和执行代码复用；对话、检查点、cwd、`env.sh`、进程管理器和文件锁各自独立。
+项目文件共享；初始 cwd 使用父会话当前目录，权限范围仍继承父会话固定的项目根目录。
+子系统提示包含自己的 ID、父 Session ID 和父会话目录；不自动复制父对话全文。
+委派时由主模型提供任务及必要背景。子智能体不提供 `update_plan` 和四个子智能体管理工具。
+
+子会话保存在 `<父会话目录>/subagents/<agent_id>/`，与普通 Session 使用相同文件结构。
+父会话 `runtime.sqlite` 的 `subagents` 元数据保存 ID、状态、本轮输入和结果；
+子会话保存 `parent_session_id` / `parent_session_dir`。结果过长时保存原文，只向父模型返回预览和路径。
+运行上下文列出尚未关闭的子智能体，压缩或重启后仍可通过 `wait_agent` 找回结果。
+
+一轮完成进入 `waiting`，最终结果通过原有后台队列交给父模型；中间输出留在子会话。
+父模型判断任务是否完成，再关闭或追加指令。每轮结束都会释放会话连接、文件锁和进程资源；
+等待后续指令期间只保留记录。子会话启动的服务也随该轮结束清理，需要持续运行的服务由主会话管理。
+
+`timeout` 单位为秒，必须有限且大于零，包含模型、工具及等待审批的时间。
+超时清理当前轮进程并返回 `timed_out`；异常返回 `failed`，都可由父模型明确继续。
+继续使用原 Session 和已有上下文，重新开始计时。`closed` 状态不再接受继续指令。
+超时或取消落在清理阶段时，会等待所有进程结束后再关闭会话、报告最终状态。
+默认审批按子会话 cwd 使用相同规则，询问交给主 CLI 并标明来源；会话信任也共用，拒绝规则仍生效。
+父智能体启用 `--full-access` 时，子智能体也直接放行所有工具调用。
+
+Ctrl-C 取消父轮次时会中断运行中的子智能体；退出 CLI 同样等待它们清理并保存 `interrupted`。
+恢复父对话的下一轮会自动在原子 Session 中继续，补齐缺失工具结果，不直接重放中断命令。
+检查点单独保存已接收的输入 ID，原任务被摘要压缩后也不会重新追加为新指令。
+`waiting`、`timed_out`、`failed` 和 `closed` 不自动续跑。`/tasks` 同时列出进程和子智能体状态。
+单次 `-p` 模式在主轮结束后退出，主模型需要先用 `wait_agent` 取得所需结果。
 
 ## Skills
 
@@ -261,7 +306,7 @@ Reactive 是 API 已报告输入过长时的异常兜底，采用规则裁剪而
 /compact                         手动压缩
 /compact focus on migration      带补充要求的压缩
 /compact --from 1 --to 4          仅压缩指定完整轮次，保留两侧消息
-/tasks                           查看当前进程任务
+/tasks                           查看进程和子智能体状态
 /sessions                        查看会话 ID
 /help
 /exit
@@ -293,7 +338,8 @@ Micro 是可移植的本地实现，不依赖 Anthropic 内部 cache_edits；裁
 结果未确认的中断调用不会自动重跑，而是让模型先检查文件或日志。
 恢复上下文也不会回滚已经修改的项目文件。
 
-交互时 Ctrl-C 取消当前执行并保留后台任务；Ctrl-D 或 `/exit` 退出并清理进程。
+交互时 Ctrl-C 取消当前执行，普通后台进程保留，运行中的子智能体记为中断；
+Ctrl-D 或 `/exit` 退出并清理进程和子智能体运行资源。
 
 ## 阅读代码
 
@@ -302,6 +348,7 @@ Micro 是可移植的本地实现，不依赖 Anthropic 内部 cache_edits；裁
 ```text
 src/mini_harness/
 ├── agent.py             # 会话入口：组装资源、恢复结果、流接口
+├── subagents.py         # 子会话委派、继续、超时、关闭与恢复
 ├── graph/
 │   ├── builder.py       # 六阶段连线与退出条件
 │   ├── nodes.py         # 每个阶段做什么
@@ -312,6 +359,7 @@ src/mini_harness/
 │   └── policy.py        # 窗口、阈值与保留范围的默认配置
 ├── tools/
 │   ├── factory.py       # 显式列出模型可调用的工具
+│   ├── agents.py        # 父智能体的四个委派工具
 │   ├── files.py         # 文件读取、写入、精确替换
 │   ├── plan.py          # 单会话当前计划的校验、整表更新与保存
 │   ├── skills.py        # 按需列出项目技能、加载指令与资源路径
@@ -326,7 +374,9 @@ src/mini_harness/
 ├── responses.py         # 模型请求、流式回复合并与校验
 └── prompts/
     ├── __init__.py      # 简短的提示词读取函数
-    ├── system.md        # 主模型提示词
+    ├── system.md        # 共同的编码与工具规则
+    ├── main.md          # 主智能体的计划与委派指令
+    ├── subagent.md      # 子智能体的职责与返回要求
     └── summary.md       # 压缩摘要提示词
 ```
 
@@ -352,7 +402,7 @@ CLI 将模型正文输出到 stdout，模型请求、工具开始/结果、后�
 工具事件带调用 ID，结束事件带退出码；Bash 非零退出会记录为 error。
 请求失败时 CLI 显示异常及其底层原因，便于定位代理、DNS 或连接问题。
 
-子 agent、MCP、任务依赖与认领、长期记忆和 hooks 的具体方案继续逐模块讨论，
+MCP、任务依赖与认领、长期记忆和 hooks 的具体方案继续逐模块讨论，
 当前没有为它们增加占位实现或通用插件框架。
 
 ## 验证
