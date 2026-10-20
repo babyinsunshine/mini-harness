@@ -104,6 +104,9 @@ class Harness:
                     finally:
                         if harness.subagents is not None:
                             await harness.subagents.interrupt()
+                        # 取消图后仍可能写入取消记录；先等写入结束，再关闭 SQLite。
+                        async with checkpointer.lock:
+                            pass
 
     def recover_missing_tool_results(self, messages):
         """补齐中断时缺失的工具结果，复用执行记录，不重新执行工具。"""

@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import signal
+import sqlite3
 from typing import Any
 
 import pytest
@@ -178,6 +179,41 @@ async def test_timeout_kills_child_processes_and_continue_gets_a_new_deadline(tm
         parent.subagents.continue_agent(agent["agent_id"], "Continue after timeout", timeout=2)
         continued = await parent.subagents.wait(agent["agent_id"])
         assert continued["status"] == "waiting" and continued["result"] == "continued"
+
+
+async def test_interrupted_child_commits_checkpoint_before_session_closes(tmp_path, monkeypatch):
+    from aiosqlite import Cursor
+
+    started = asyncio.Event()
+    execute = Cursor.executemany
+
+    async def slow_cancellation_write(cursor, sql, parameters):
+        result = await execute(cursor, sql, parameters)
+        if any(row[6] == "__error__" for row in parameters):
+            # 保留真实事务，只延迟取消记录的提交，稳定复现关闭连接的竞态。
+            await asyncio.sleep(0.1)
+        return result
+
+    monkeypatch.setattr(Cursor, "executemany", slow_cancellation_write)
+
+    async def reply(child, messages):
+        if any(m.content == "Continue" for m in messages if isinstance(m, HumanMessage)):
+            return AIMessage(content="continued")
+        started.set()
+        await asyncio.Event().wait()
+
+    async with Harness.open(tmp_path, tmp_path / "parent", AgentModel(handler=reply)) as parent:
+        agent = parent.subagents.spawn("Start", timeout=30)
+        await asyncio.wait_for(started.wait(), 5)
+        await parent.subagents.interrupt()
+        directory = parent.session.directory / "subagents" / agent["agent_id"]
+        with sqlite3.connect(directory / "state.sqlite") as database:
+            assert database.execute(
+                "SELECT count(*) FROM writes WHERE channel='__error__'"
+            ).fetchone()[0] == 1
+        parent.subagents.continue_agent(agent["agent_id"], "Continue", timeout=5)
+        result = await parent.subagents.wait(agent["agent_id"])
+        assert result["status"] == "waiting" and result["result"] == "continued"
 
 
 async def test_parent_tools_deliver_only_final_child_result_without_stream_leak(tmp_path):
