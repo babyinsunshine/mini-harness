@@ -122,7 +122,7 @@ uv run mini-harness --resume SESSION_ID
 
 - 每次 Bash 都启动新进程，继承启动环境时过滤 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、
   `DEEPSEEK_API_KEY`、`AZURE_OPENAI_API_KEY` 和 `AZURE_OPENAI_AD_TOKEN`；父进程的模型配置不受影响。
-  每个会话自动创建一份空的 `env.sh`，
+  每个新会话自动创建 `env.sh`，初始化写入 `export PYTHONUNBUFFERED=1`，让 Python 日志及时输出；
   每条命令执行前在同一 Bash 中 `source`。固定系统提示包含文件的绝对路径和加载规则；
   智能体可通过文件工具读写它，修改在下一次 Bash 调用生效。
   文件跨工作目录使用，恢复会话时保留原内容；一次命令里的临时 `export` 不跨调用。
@@ -131,7 +131,9 @@ uv run mini-harness --resume SESSION_ID
 - `timeout` 是前台等待时间，默认 120 秒；未完成时保留原进程并转后台。
   `run_in_background=True` 则直接后台运行。
 - stdout/stderr 持续写入文件，结果返回日志路径、头尾预览、任务 ID 和退出码。
-  超长预览保留开头约 500 字节、末尾约 1500 字节，并标明 `truncated` 和 `output_bytes`。
+  不超过 12000 字节时完整返回；超出时保留开头 3000 字节、末尾 9000 字节，
+  并标明 `truncated` 和 `output_bytes`。完整日志始终保留。
+  退出码是整个脚本的最终状态；有依赖的命令用 `&&` 串联，展示日志时保留测试退出码。
   stdin 使用普通管道，可追加输入和发送 EOF；没有 PTY。
 - 后台完成通知在安全的模型调用点注入；空闲的交互 CLI 可以继续处理完成事件。
 - `--process-timeout` 控制命令最长运行时间，默认一小时。停止和正常退出会清理进程组。

@@ -62,6 +62,8 @@ def create_tools(session: Session, processes, subagents=None, *, include_plan=Tr
 
         Unfinished commands go to background.
         Each call is a new process. Main foreground cwd persists; exports do not.
+        exit_code is the shell's final status; earlier commands may have failed.
+        Chain dependent commands with &&; preserve test exit codes when showing logs.
         Read the output_path for full logs. Background directory changes are isolated.
         """
         return await processes.run(command, timeout, run_in_background)

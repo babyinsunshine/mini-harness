@@ -1,5 +1,6 @@
 import asyncio
 import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,15 +28,30 @@ async def test_bash_filters_model_keys_but_keeps_project_environment(tmp_path, m
             assert result["preview"] == "explicit-project-value"
 
 
-async def test_long_log_preview_keeps_start_and_final_error(tmp_path):
+@pytest.mark.parametrize("padding, truncated", [(4000, False), (20000, True)])
+async def test_log_preview_keeps_medium_output_and_long_log_edges(tmp_path, padding, truncated):
     with Session(tmp_path / "s", tmp_path) as session:
         async with ProcessManager(session) as processes:
             result = await processes.run(
-                "python3 -c \"print('BEGIN' + 'x' * 4000 + 'FINAL ERROR')\""
+                f"python3 -c \"print('BEGIN' + 'x' * {padding} + 'FINAL ERROR')\""
             )
             assert "BEGIN" in result["preview"] and "FINAL ERROR" in result["preview"]
-            assert result["truncated"] is True
-            assert result["output_bytes"] > 4000
+            assert result["truncated"] is truncated
+            output = Path(result["output_path"]).read_text()
+            assert output == "BEGIN" + "x" * padding + "FINAL ERROR\n"
+            if not truncated:
+                assert result["preview"] == output
+
+
+async def test_python_stdout_is_not_delayed_after_stderr(tmp_path, monkeypatch):
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    command = shlex.join([
+        sys.executable, "-c", "import sys; print('stdout'); print('stderr', file=sys.stderr)",
+    ])
+    with Session(tmp_path / "s", tmp_path) as session:
+        async with ProcessManager(session) as processes:
+            result = await processes.run(command)
+            assert result["preview"] == "stdout\nstderr\n"
 
 
 async def wait_done(manager, task_id):

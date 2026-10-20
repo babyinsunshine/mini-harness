@@ -34,7 +34,8 @@ class ProcessManager:
         """max_runtime_seconds 限制进程总运行时间，包含转入后台后的时间。"""
         self.session = session
         self.env_file = session.directory / "env.sh"
-        self.env_file.touch(exist_ok=True)
+        if not self.env_file.exists():
+            self.env_file.write_text("export PYTHONUNBUFFERED=1\n")
         # 模型凭据留在父进程；env.sh 仍可显式传入项目所需变量。
         self.environment = {
             key: value for key, value in os.environ.items() if key not in MODEL_CREDENTIALS
@@ -137,20 +138,26 @@ class ProcessManager:
 
     def describe_task(self, task: ProcessTask) -> dict:
         """从进程句柄和日志生成当前任务状态，不等待任务完成。"""
+        preview_limit = 12000
         with task.output_path.open("rb") as stream:
             output_bytes = os.fstat(stream.fileno()).st_size
-            preview = stream.read(output_bytes if output_bytes <= 2000 else 500)
-            if output_bytes > 2000:
+            preview = stream.read(
+                output_bytes if output_bytes <= preview_limit else preview_limit // 4
+            )
+            if output_bytes > preview_limit:
                 # 保留开头的命令信息，以及尾部常见的报错和测试结论。
-                stream.seek(output_bytes - 1500)
-                preview += b"\n[... middle omitted; see output_path ...]\n" + stream.read(1500)
+                tail_bytes = preview_limit * 3 // 4
+                stream.seek(output_bytes - tail_bytes)
+                preview += (
+                    b"\n[... middle omitted; see output_path ...]\n" + stream.read(tail_bytes)
+                )
         return {
             "task_id": task.id,
             "status": "running" if task.process.returncode is None else "exited",
             "exit_code": task.process.returncode,
             "output_path": str(task.output_path),
             "preview": preview.decode("utf-8", errors="replace"),
-            "truncated": output_bytes > 2000,
+            "truncated": output_bytes > preview_limit,
             "output_bytes": output_bytes,
             "reason": task.reason,
         }
