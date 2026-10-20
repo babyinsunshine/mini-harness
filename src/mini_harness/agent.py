@@ -34,11 +34,13 @@ from .tools.processes import ProcessManager
 class Harness:
     def __init__(
         self, session, processes, model, policy, checkpointer, max_steps,
-        approve=None, process_timeout=3600, parent_permissions=None,
+        approve=None, process_timeout=3600, parent_permissions=None, full_access=False,
     ):
         self.session, self.processes = session, processes
         self.context = ContextManager(session, model, policy)
-        self.permissions = Permissions(session, approve, parent_permissions)
+        self.permissions = Permissions(
+            session, approve, parent_permissions, full_access=full_access,
+        )
         is_child = session.get("parent_session_id") is not None
         self.subagents = None if is_child else SubagentManager(self, max_steps, process_timeout)
         tools = create_tools(session, processes, self.subagents, include_plan=not is_child)
@@ -74,12 +76,13 @@ class Harness:
     async def open(
         cls, cwd, session_dir, model, policy=None,
         max_steps=1000, process_timeout=3600, approve=None,
-        parent_session=None, parent_permissions=None,
+        parent_session=None, parent_permissions=None, full_access=False,
     ):
         """打开会话；cwd 是首次工作目录，session_dir 保存会话数据。
 
         max_steps 按图节点计数；process_timeout 单位为秒；approve 是异步审批回调。
         parent_session / parent_permissions 仅供子智能体继承父身份与审批入口。
+        full_access 显式跳过工具权限规则；子智能体沿用父权限。
         """
         with Session(Path(session_dir), Path(cwd)) as session:
             if parent_session is not None:
@@ -98,6 +101,7 @@ class Harness:
                         approve=approve,
                         process_timeout=process_timeout,
                         parent_permissions=parent_permissions,
+                        full_access=full_access,
                     )
                     try:
                         yield harness

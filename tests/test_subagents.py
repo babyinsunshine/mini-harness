@@ -93,8 +93,8 @@ async def test_continue_reuses_history_and_close_keeps_records(tmp_path):
             parent.subagents.continue_agent(agent["agent_id"], "Cannot continue")
 
 
-@pytest.mark.parametrize("trusted", [False, True])
-async def test_child_permissions_use_parent_approval_and_trust(tmp_path, trusted):
+@pytest.mark.parametrize("mode", ["approval", "trust", "full-access"])
+async def test_child_permissions_inherit_parent_mode(tmp_path, mode):
     project, outside = tmp_path / "project", tmp_path / "outside.txt"
     project.mkdir()
     decisions = []
@@ -109,12 +109,12 @@ async def test_child_permissions_use_parent_approval_and_trust(tmp_path, trusted
         return AIMessage(content="finished")
 
     async with Harness.open(project, tmp_path / "parent", AgentModel(handler=reply),
-                            approve=approve) as parent:
-        parent.permissions.session_trusted = trusted
+                            approve=approve, full_access=mode == "full-access") as parent:
+        parent.permissions.session_trusted = mode == "trust"
         agent = parent.subagents.spawn("Write the requested file")
         result = await parent.subagents.wait(agent["agent_id"])
         assert result["status"] == "waiting" and outside.read_text() == "approved"
-        assert len(decisions) == (0 if trusted else 1)
+        assert len(decisions) == (1 if mode == "approval" else 0)
         if decisions:
             assert decisions[0]["agent_id"] == agent["agent_id"]
 

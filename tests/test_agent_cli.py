@@ -523,6 +523,7 @@ def test_resume_restores_model_window_with_explicit_overrides(tmp_path):
                 "notes": True,
                 "micro_keep_tokens": 32000,
                 "micro_idle_seconds": 600,
+                "full_access": True,
             },
         )
     args = build_parser().parse_args(
@@ -534,6 +535,7 @@ def test_resume_restores_model_window_with_explicit_overrides(tmp_path):
     assert args.output_reserve == 4096
     # Legacy session settings must not re-enable the removed background feature.
     assert not hasattr(args, "notes")
+    assert not args.full_access  # 恢复会话时不自动开启完全访问。
     assert args.micro_keep_tokens == 32000
     assert args.micro_idle_seconds == 300
     assert args.max_steps == 1000
@@ -545,3 +547,6 @@ def test_resume_restores_model_window_with_explicit_overrides(tmp_path):
     args = build_parser().parse_args(["--resume", "s", "--max-steps", "600"])
     resolve_settings(args, directory)
     assert args.max_steps == 600
+    args = build_parser().parse_args(["--resume", "s", "--full-access"])
+    resolve_settings(args, directory)
+    assert args.full_access

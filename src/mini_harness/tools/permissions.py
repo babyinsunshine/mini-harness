@@ -25,16 +25,20 @@ READ_FLAGS = {
 class Permissions:
     """先审批再进入执行记录；approve 由 CLI 提供，缺省时不执行需要审批的操作。"""
 
-    def __init__(self, session: Session, approve=None, parent=None):
+    def __init__(self, session: Session, approve=None, parent=None, *, full_access=False):
         self.session, self.approve = session, approve
         self.parent = parent
+        self.full_access = full_access
         self.session_trusted = False  # 只保存在内存，恢复会话时重新审批。
 
     async def check(self, tool_call):
         """允许时返回 None；拒绝时返回未执行的 ToolMessage。"""
-        action, reason = classify(tool_call, self.session)
-        allowed = action == "allow"
         authority = self.parent or self
+        if authority.full_access:
+            action, reason = "allow", "Full access enabled"
+        else:
+            action, reason = classify(tool_call, self.session)
+        allowed = action == "allow"
         if action == "ask" and authority.session_trusted:
             allowed = True
         elif action == "ask" and authority.approve is not None:

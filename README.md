@@ -77,9 +77,15 @@ uv run mini-harness --model 'openai:YOUR_MODEL_ID' --base-url 'https://YOUR_ENDP
 程序调用 `Harness.open(..., approve=callback)` 可以提供异步 `(tool_call, reason) -> bool` 回调；
 省略回调时也不会自动放行需要审批的调用。审批前不记录 `started`，恢复会话时仍按原规则补齐工具结果。
 
+添加 `--full-access` 启用完全访问：所有工具调用直接放行，包括默认规则中的拒绝项，
+主智能体与子智能体均不询问审批；权限与工具执行日志照常记录。
+此开关只对本次启动生效，恢复会话时需再次传入。程序调用可使用 `Harness.open(..., full_access=True)`。
+
 ```bash
 # 单次任务
 uv run mini-harness --model 'anthropic:YOUR_MODEL_ID' -p '查看项目并解释测试入口'
+# 完全访问，无需审批
+uv run mini-harness --model 'anthropic:YOUR_MODEL_ID' --full-access
 # 查看和恢复会话
 uv run mini-harness --list-sessions
 uv run mini-harness --resume SESSION_ID
@@ -190,7 +196,8 @@ CLI 复用 `tool_end` 事件显示 `[ ]` / `[>]` / `[x]` 和完成数量，不�
 超时清理当前轮进程并返回 `timed_out`；异常返回 `failed`，都可由父模型明确继续。
 继续使用原 Session 和已有上下文，重新开始计时。`closed` 状态不再接受继续指令。
 超时或取消落在清理阶段时，会等待所有进程结束后再关闭会话、报告最终状态。
-审批按子会话 cwd 使用相同规则，询问交给主 CLI 并标明来源；会话信任也共用，拒绝规则始终生效。
+默认审批按子会话 cwd 使用相同规则，询问交给主 CLI 并标明来源；会话信任也共用，拒绝规则仍生效。
+父智能体启用 `--full-access` 时，子智能体也直接放行所有工具调用。
 
 Ctrl-C 取消父轮次时会中断运行中的子智能体；退出 CLI 同样等待它们清理并保存 `interrupted`。
 恢复父对话的下一轮会自动在原子 Session 中继续，补齐缺失工具结果，不直接重放中断命令。

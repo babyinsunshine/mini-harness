@@ -35,13 +35,15 @@ async def run_cli(args, session_dir):
     async with Harness.open(
         args.cwd, session_dir, model, policy,
         max_steps=args.max_steps, process_timeout=args.process_timeout,
+        full_access=args.full_access,
     ) as harness:
         harness.session.set(
             "config",
             {key: getattr(args, key) for key in DEFAULTS},
         )
         print(
-            f"Session: {harness.session.id}\nContext window: {policy.window} tokens",
+            f"Session: {harness.session.id}\nContext window: {policy.window} tokens\n"
+            f"Permissions: {'full access' if args.full_access else 'standard'}",
             file=sys.stderr,
         )
         if args.prompt is not None:

@@ -22,6 +22,10 @@ def build_parser():
     cli_parser.add_argument("--resume", metavar="SESSION_ID")
     cli_parser.add_argument("--list-sessions", action="store_true")
     cli_parser.add_argument(
+        "--full-access", action="store_true",
+        help="Allow all tool calls without approval, including normally denied actions",
+    )
+    cli_parser.add_argument(
         "--context-window",
         type=int,
         help="Model context window in tokens (default: conservative 128000)",

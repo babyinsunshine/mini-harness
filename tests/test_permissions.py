@@ -1,10 +1,11 @@
 """Permission rules inspect requests; dangerous examples are never executed."""
 
+import json
 
 import pytest
 
 from mini_harness.session import Session
-from mini_harness.tools.permissions import classify
+from mini_harness.tools.permissions import Permissions, classify
 
 
 @pytest.fixture
@@ -136,3 +137,19 @@ def test_internal_git_changes_need_approval(session):
 def test_missing_arguments_are_not_automatically_allowed(session):
     assert decision(session, "bash") == "ask"
     assert decision(session, "write_file") == "ask"
+
+
+@pytest.mark.parametrize("name, args", [
+    ("write_file", {"path": "../outside.txt", "content": "allowed"}),
+    ("write_file", {"path": "/etc/example", "content": "allowed"}),
+    ("bash", {"command": "rm -rf build"}),
+])
+async def test_full_access_allows_ask_and_deny_without_approval(session, name, args):
+    async def approve(tool_call, reason):
+        pytest.fail("Full access must not request approval")
+
+    permissions = Permissions(session, approve=approve, full_access=True)
+    # 仅检查权限，不实际执行这些调用。
+    assert await permissions.check({"name": name, "args": args, "id": "full-access"}) is None
+    record = json.loads(session.transcript.read_text().splitlines()[-1])
+    assert record["kind"] == "permission" and record["allowed"] is True
