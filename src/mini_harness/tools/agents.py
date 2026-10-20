@@ -22,14 +22,19 @@ def create_agent_tools(manager):
     async def continue_agent(agent_id: str, message: str, timeout: float | None = None) -> dict:
         """Send another instruction in the original subagent session and return immediately.
 
-        The subagent must have stopped running. Its deadline restarts; timeout=None
-        keeps the previous duration. Use after waiting, failure or timeout.
+        The subagent must be waiting, failed, timed_out or interrupted.
+        A closed subagent cannot be continued.
+        Each new turn restarts the deadline; timeout=None keeps the previous duration.
         """
         return manager.continue_agent(agent_id, message, timeout)
 
     @tool
     async def close_agent(agent_id: str) -> dict:
-        """Close a subagent, stop its running work and retain its session records."""
+        """Close a subagent permanently, stop its running work and retain its session records.
+
+        Sets status to closed. A closed subagent cannot be continued with continue_agent.
+        Close only when no further work is needed; otherwise leave it waiting for follow-up.
+        """
         return await manager.close_agent(agent_id)
 
     return [spawn_agent, wait_agent, continue_agent, close_agent]
