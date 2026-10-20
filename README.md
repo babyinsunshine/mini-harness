@@ -35,17 +35,27 @@ flowchart TD
 需要 Python 3.11+、Bash 和 POSIX 系统（目前在 Linux 验证）。在本项目目录安装：
 
 ```bash
-uv sync --extra anthropic
-export ANTHROPIC_API_KEY='你的密钥'
-uv run mini-harness --model 'anthropic:YOUR_MODEL_ID' --cwd /path/to/project
+uv sync
+export OPENAI_API_KEY='你的 DeepSeek API 密钥'
+uv run mini-harness
 ```
 
-OpenAI 或兼容接口：
+默认使用 `openai:deepseek-flash` 和 `https://api.deepseek.com`，无需传模型或接口参数。
+模型名和地址对应 [DeepSeek 官方配置](https://api-docs.deepseek.com/quick_start/agent_integrations/)。
+指定工作目录可加 `--cwd /path/to/project`。
+
+其他兼容接口可显式覆盖模型和地址：
 
 ```bash
-uv sync --extra openai
-export OPENAI_API_KEY='你的密钥'
 uv run mini-harness --model 'openai:YOUR_MODEL_ID' --base-url 'https://YOUR_ENDPOINT/v1'
+```
+
+使用 Anthropic 时按需安装适配器：
+
+```bash
+uv sync --extra anthropic
+export ANTHROPIC_API_KEY='你的密钥'
+uv run mini-harness --model 'anthropic:YOUR_MODEL_ID'
 ```
 
 也可以设置 `HARNESS_MODEL`。密钥由供应商 SDK 读取，不保存到会话。
@@ -83,9 +93,9 @@ uv run mini-harness --model 'openai:YOUR_MODEL_ID' --base-url 'https://YOUR_ENDP
 
 ```bash
 # 单次任务
-uv run mini-harness --model 'anthropic:YOUR_MODEL_ID' -p '查看项目并解释测试入口'
+uv run mini-harness -p '查看项目并解释测试入口'
 # 完全访问，无需审批
-uv run mini-harness --model 'anthropic:YOUR_MODEL_ID' --full-access
+uv run mini-harness --full-access
 # 查看和恢复会话
 uv run mini-harness --list-sessions
 uv run mini-harness --resume SESSION_ID
@@ -95,14 +105,6 @@ uv run mini-harness --resume SESSION_ID
 显式传入的新参数优先。`--cwd` 默认当前目录；已有会话保留
 自己的工作目录。日常自动化验证使用离线模型驱动真实 graph；另外已完成 DeepSeek
 真实 API 的工具调用、会话恢复和手动压缩验证。
-
-本次通过的 DeepSeek 配置：
-
-```bash
-uv sync --extra openai
-export OPENAI_API_KEY='你的 DeepSeek API 密钥'
-uv run mini-harness --model 'openai:deepseek-flash' --base-url 'https://api.deepseek.com'
-```
 
 验证范围和结果见 [DeepSeek 实测记录](docs/validation/2026-10-17-deepseek.md)。
 

@@ -493,7 +493,7 @@ async def test_idle_micro_persists_real_tool_results_across_graph_reopens(tmp_pa
     assert model.seen[0][0].content == resumed.seen[0][0].content == again.seen[0][0].content
 
 
-def test_cli_help_and_missing_model_config(tmp_path):
+def test_cli_help_and_default_deepseek_startup(tmp_path):
     command = [sys.executable, "-m", "mini_harness"]
     result = subprocess.run([*command, "--help"], capture_output=True, text=True)
     assert result.returncode == 0
@@ -502,14 +502,40 @@ def test_cli_help_and_missing_model_config(tmp_path):
 
     environment = dict(os.environ)
     environment.pop("HARNESS_MODEL", None)
+    environment["OPENAI_API_KEY"] = "local-test-not-a-secret"
+    environment["LANGSMITH_TRACING"] = "false"
+    environment["LANGCHAIN_TRACING_V2"] = "false"
     result = subprocess.run(
-        [*command, "--session-dir", str(tmp_path), "-p", "hello"],
+        [*command, "--session-dir", str(tmp_path)],
         capture_output=True,
         text=True,
         env=environment,
+        input="/exit\n",  # 启动后立即退出，不向真实 API 发送请求。
+        timeout=15,
     )
-    assert result.returncode == 2
-    assert "--model" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "Session:" in result.stderr
+    with Session(next(tmp_path.iterdir())) as session:
+        settings = session.get("config")
+        assert settings["model"] == "openai:deepseek-flash"
+        assert settings["base_url"] == "https://api.deepseek.com"
+
+
+@pytest.mark.parametrize("arguments, expected_model, expected_url", [
+    ([], "openai:deepseek-flash", "https://api.deepseek.com"),
+    (["--model", "openai:deepseek-v4-pro"], "openai:deepseek-v4-pro", "https://api.deepseek.com"),
+    (["--model", "openai:other"], "openai:other", None),
+    (["--model", "anthropic:other"], "anthropic:other", None),
+    (["--base-url", "http://localhost:9000/v1"],
+     "openai:deepseek-flash", "http://localhost:9000/v1"),
+])
+def test_default_endpoint_follows_model_and_explicit_override(
+    tmp_path, monkeypatch, arguments, expected_model, expected_url,
+):
+    monkeypatch.delenv("HARNESS_MODEL", raising=False)
+    args = build_parser().parse_args(arguments)
+    resolve_settings(args, tmp_path)
+    assert (args.model, args.base_url) == (expected_model, expected_url)
 
 
 def test_resume_restores_model_window_with_explicit_overrides(tmp_path):
