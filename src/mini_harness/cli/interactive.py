@@ -12,6 +12,7 @@ from time import monotonic
 from ..responses import format_error
 from .config import list_sessions
 from .display import display_events
+from .usage import format_session_usage
 
 
 async def handle_input(harness, user_input, sessions_dir):
@@ -24,10 +25,12 @@ async def handle_input(harness, user_input, sessions_dir):
                 print(json.dumps({key: agent[key] for key in (
                     "agent_id", "status", "session_dir"
                 )}, ensure_ascii=False))
+    elif user_input == "/stats":
+        print(format_session_usage(harness.session))
     elif user_input == "/sessions":
         print("\n".join(list_sessions(sessions_dir)))
     elif user_input == "/help":
-        print("/compact [--from N --to M] [focus]  /tasks  /sessions  /exit")
+        print("/compact [--from N --to M] [focus]  /tasks  /stats  /sessions  /exit")
     elif user_input == "/compact" or user_input.startswith("/compact "):
         options = argparse.ArgumentParser(add_help=False, exit_on_error=False)
         options.add_argument("--from", dest="start_group", type=int)
