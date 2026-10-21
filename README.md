@@ -207,6 +207,59 @@ Ctrl-C 取消父轮次时会中断运行中的子智能体；退出 CLI 同样�
 `waiting`、`timed_out`、`failed` 和 `closed` 不自动续跑。`/tasks` 同时列出进程和子智能体状态。
 单次 `-p` 模式在主轮结束后退出，主模型需要先用 `wait_agent` 取得所需结果。
 
+## MCP
+
+安装可选的客户端依赖：
+
+```bash
+uv sync --extra mcp
+uv run --extra mcp mini-harness --mcp-config path/to/mcp.json
+```
+
+通过 `--mcp-config` 显式启用；未指定时不连接，也不注册 MCP 工具。
+配置路径会随会话保存，`--resume` 时重新连接。配置在启动时读取，`cd` 不切换服务器。
+配置中的 `command` 会在打开会话时启动；`args` 按参数列表传入，`env` 显式配置服务器环境。
+stdio 的 `cwd` 缺省为配置文件所在目录，相对 `cwd` 也以该目录解析；`env.sh` 只用于 Bash。
+请求与初始化超时均为 60 秒，连接或配置错误直接报告，不自动更换服务器或重试工具动作。
+
+模型只获得两个通用工具，外部工具目录按需读取：
+
+| 工具 | 用途 |
+| --- | --- |
+| `list_mcp_tools()` | 列出已配置的服务器名称 |
+| `list_mcp_tools(server, tool_name=None)` | 查看工具描述和参数 schema，可按工具名筛选 |
+| `call_mcp_tool(server, tool_name, arguments)` | 调用选中的工具 |
+
+发现工具直接允许；实际调用沿用现有审批，`--full-access` 下直接允许。
+文本与结构化结果进入工具消息，超长结果复用 `artifacts/` 落盘。
+图片和音频保存为文件并返回路径，当前不作为多模态内容发给模型。
+
+支持 stdio 与 Streamable HTTP。例如连接已经启动的 HTTP MCP 服务：
+
+```json
+{
+  "mcpServers": {
+    "example": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+HTTP 可在同一配置项中添加 `headers`，例如服务要求的 Authorization 头。
+`.mcp.json` 默认被 Git 忽略，实际密钥留在本地配置中。
+
+[Windows-MCP](https://github.com/CursorTouch/Windows-MCP) 必须运行在 Windows 侧。
+当前版本需要 Python 3.14+，可在 Windows PowerShell 中用 `uvx --python 3.14 windows-mcp --help`
+先准备环境；通过 `Get-Command uvx` 确认可执行文件路径，再修改
+[`examples/mcp.windows-wsl.json`](examples/mcp.windows-wsl.json) 并作为 `--mcp-config` 传入。
+这个示例通过 Windows PowerShell 启动服务器，harness 继续运行在 WSL 中。
+普通文本模型先使用 `Snapshot` 的文本 UI 树；截图返回图片文件，需要视觉能力时另行接入。
+
+主会话保持 MCP 连接，子智能体复用父连接；结束子智能体不会关闭共享服务器。
+退出主会话时关闭所有客户端，并结束由本会话启动的 stdio 服务；HTTP 服务由外部管理。
+恢复会话会建立新连接，服务器内存状态和临时句柄不保证延续，应重新读取远端状态。
+
 ## Skills
 
 模型通过两个普通工具按需发现和加载 skill，系统提示只说明工具用法，不包含技能目录：
@@ -366,6 +419,7 @@ src/mini_harness/
 │   ├── files.py         # 文件读取、写入、精确替换
 │   ├── plan.py          # 单会话当前计划的校验、整表更新与保存
 │   ├── skills.py        # 按需列出项目技能、加载指令与资源路径
+│   ├── mcp.py           # MCP 连接生命周期、按需发现与通用调用
 │   ├── processes.py     # Bash、cwd、stdin、后台任务与清理
 │   └── permissions.py   # allow / ask / deny 与单次审批
 ├── cli/
@@ -411,7 +465,7 @@ API 未返回缓存数据的请求不参与该比率，界面会显示数据覆�
 工具事件带调用 ID，结束事件带退出码；Bash 非零退出会记录为 error。
 请求失败时 CLI 显示异常及其底层原因，便于定位代理、DNS 或连接问题。
 
-MCP、任务依赖与认领、长期记忆和 hooks 的具体方案继续逐模块讨论，
+任务依赖与认领、长期记忆和 hooks 的具体方案继续逐模块讨论，
 当前没有为它们增加占位实现或通用插件框架。
 
 ## 验证

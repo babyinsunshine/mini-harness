@@ -82,6 +82,7 @@ class SubagentManager:
                     self.parent.context.policy, max_steps=self.max_steps,
                     process_timeout=self.process_timeout, parent_session=self.session,
                     parent_permissions=self.parent.permissions,
+                    parent_mcp=self.parent.mcp_clients,
                 ) as child:
                     async for _ in child.events(agent["input"], input_id=agent["input_id"]):
                         pass

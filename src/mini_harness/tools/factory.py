@@ -5,11 +5,14 @@ from langchain_core.tools import tool
 from ..session import Session
 from .agents import create_agent_tools
 from .files import edit_file, read_file, write_file
+from .mcp import create_mcp_tools
 from .plan import PlanStep, update_plan
 from .skills import list_skills, load_skill
 
 
-def create_tools(session: Session, processes, subagents=None, *, include_plan=True):
+def create_tools(
+    session: Session, processes, subagents=None, *, include_plan=True, mcp_clients=None,
+):
     """绑定会话资源；工具名和参数直接构成模型看到的调用协议。"""
     @tool("update_plan")
     async def update_plan_tool(plan: list[PlanStep], explanation: str | None = None) -> dict:
@@ -84,4 +87,6 @@ def create_tools(session: Session, processes, subagents=None, *, include_plan=Tr
         tools.append(update_plan_tool)
     if subagents is not None:
         tools.extend(create_agent_tools(subagents))
+    if mcp_clients:
+        tools.extend(create_mcp_tools(session, mcp_clients))
     return tools

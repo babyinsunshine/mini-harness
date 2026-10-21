@@ -9,6 +9,7 @@ __pycache__/
 .harness/
 .mini-harness/
 .env
+.mcp.json
 .env.*
 !.env.example
 *.sqlite
