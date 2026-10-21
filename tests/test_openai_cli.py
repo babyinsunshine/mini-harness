@@ -101,7 +101,11 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(
             usage = {
                 "id": "chatcmpl-local", "object": "chat.completion.chunk", "created": 1,
                 "model": "local-model", "choices": [],
-                "usage": {"prompt_tokens": 700, "completion_tokens": 50, "total_tokens": 750},
+                "usage": {
+                    "prompt_tokens": 700, "completion_tokens": 50, "total_tokens": 750,
+                    "prompt_tokens_details": {"cached_tokens": 560},
+                    "prompt_cache_hit_tokens": 560, "prompt_cache_miss_tokens": 140,
+                },
             }
             self.wfile.write(("data: " + json.dumps(usage) + "\n\n").encode())
             self.wfile.write(b"data: [DONE]\n\n")
@@ -142,6 +146,7 @@ def test_cli_with_real_openai_adapter_streams_tools_and_restores_session(
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "Local verified"
         assert "700 in / 50 out" in result.stderr
+        assert "cache 80.0% (560/700)" in result.stderr
         if (outside and not full_access) or broken:
             assert not (tmp_path / "outside.txt").exists()
             assert not (project / "smoke.txt").exists()

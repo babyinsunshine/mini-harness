@@ -309,6 +309,7 @@ Reactive 是 API 已报告输入过长时的异常兜底，采用规则裁剪而
 /compact focus on migration      带补充要求的压缩
 /compact --from 1 --to 4          仅压缩指定完整轮次，保留两侧消息
 /tasks                           查看进程和子智能体状态
+/stats                           查看主会话累计 token 与缓存命中率
 /sessions                        查看会话 ID
 /help
 /exit
@@ -371,7 +372,8 @@ src/mini_harness/
 │   ├── main.py          # 创建模型、打开会话、选择运行方式
 │   ├── config.py        # 参数解析与配置恢复
 │   ├── interactive.py   # 输入、审批、会话命令与 Ctrl-C
-│   └── display.py       # 正文与执行状态展示
+│   ├── display.py       # 正文与执行状态展示
+│   └── usage.py         # 单次缓存用量与主会话累计统计
 ├── session.py           # 会话锁、SQLite、JSONL、输出文件
 ├── responses.py         # 模型请求、流式回复合并与校验
 └── prompts/
@@ -401,6 +403,11 @@ CLI 将模型正文输出到 stdout，模型请求、工具开始/结果、后�
 预览只展示少量行，完整结果按提示查文件或继续读取。`Harness.events(user_input)` 提供这些事件；
 `Harness.stream(user_input)` 保留只产生模型正文的接口。旧 `create_agent` 会话的消息检查点可以继续恢复。
 `model_end` 事件包含耗时、API usage 和结束原因，也写入会话记录；CLI 显示这些信息。
+每次请求显示缓存命中率，例如 `cache 80.0% (560/700)`，表示输入的 700 个 token 中有 560 个命中缓存。
+`/stats` 从当前会话的 `transcript.jsonl` 汇总已记录的主请求，恢复会话后继续累计；
+不含独立子智能体和摘要调用，也不会发起模型请求或改变上下文。
+累计命中率为缓存 token 总数除以对应输入 token 总数，不平均每次的百分比。
+API 未返回缓存数据的请求不参与该比率，界面会显示数据覆盖的请求数；无数据或输入为 0 时显示 `n/a`。
 工具事件带调用 ID，结束事件带退出码；Bash 非零退出会记录为 error。
 请求失败时 CLI 显示异常及其底层原因，便于定位代理、DNS 或连接问题。
 

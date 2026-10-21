@@ -3,6 +3,8 @@
 import json
 import sys
 
+from .usage import format_cache_usage
+
 
 def format_event(event) -> str:
     event_type = event["type"]
@@ -12,6 +14,8 @@ def format_event(event) -> str:
         details = [f"{event['elapsed']:.2f}s"]
         if usage := event["usage"]:
             details.append(f"{usage['input_tokens']:,} in / {usage['output_tokens']:,} out")
+        cached_tokens = usage.get("input_token_details", {}).get("cache_read")
+        details.append(format_cache_usage(usage.get("input_tokens", 0), cached_tokens))
         if event["finish_reason"]:
             details.append(event["finish_reason"])
         return "[model] " + " · ".join(details)
