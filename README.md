@@ -254,6 +254,7 @@ HTTP 可在同一配置项中添加 `headers`，例如服务要求的 Authorizat
 先准备环境；通过 `Get-Command uvx` 确认可执行文件路径，再修改
 [`examples/mcp.windows-wsl.json`](examples/mcp.windows-wsl.json) 并作为 `--mcp-config` 传入。
 这个示例通过 Windows PowerShell 启动服务器，harness 继续运行在 WSL 中。
+启动配置定向忽略 MCP 日志接口的弃用警告，其他警告和错误照常输出。
 普通文本模型先使用 `Snapshot` 的文本 UI 树；截图返回图片文件，需要视觉能力时另行接入。
 
 主会话保持 MCP 连接，子智能体复用父连接；结束子智能体不会关闭共享服务器。

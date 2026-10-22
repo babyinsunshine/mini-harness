@@ -7,7 +7,7 @@
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "& 'C:\\Users\\YOUR_USER\\.local\\bin\\uvx.exe' --python 3.14 windows-mcp serve"
+        "$env:PYTHONWARNINGS='ignore:The logging capability is deprecated as of 2026-07-28'; & 'C:\\Users\\YOUR_USER\\.local\\bin\\uvx.exe' --python 3.14 windows-mcp serve"
       ]
     }
   }
