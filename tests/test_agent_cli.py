@@ -230,6 +230,7 @@ async def test_runtime_changes_and_resume_preserve_system_and_history_prefix(tmp
     model = ScriptedModel(
         responses=[
             call("bash", {"command": f"cd {shlex.quote(str(target))}"}, "change-cwd"),
+            call("read_file", {"path": str(instructions)}, "read-instructions"),
             call(
                 "write_file",
                 {"path": str(instructions), "content": "Run pytest -q before finishing.\n"},
@@ -240,11 +241,11 @@ async def test_runtime_changes_and_resume_preserve_system_and_history_prefix(tmp
     )
     async with Harness.open(project, directory, model, approve=allow_test_request) as harness:
         assert await consume(harness, "Update the project") == "Updated"
-    first, second, third = model.seen
-    assert first[0].content == second[0].content == third[0].content
+    first, second, _, last = model.seen
+    assert all(request[0].content == first[0].content for request in model.seen)
     assert "Run pytest" not in first[0].content
     assert f"Current directory: {target}" in second[-1].content
-    assert "Run pytest -q" in third[-1].content
+    assert "Run pytest -q" in last[-1].content
     for previous, current in zip(model.seen, model.seen[1:]):
         assert [m.model_dump() for m in current[: len(previous)]] == [
             m.model_dump() for m in previous

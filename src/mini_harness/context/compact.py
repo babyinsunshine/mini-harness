@@ -184,8 +184,11 @@ def restore_recent_files(
         if budget < 128:
             break
         try:
-            text = read_file(session, item["path"], item["offset"], item["limit"])["output"]
-        except (OSError, UnicodeError):
+            # 附件可能因预算被丢弃；自动读取不能推进智能体确认过的文件版本。
+            text = read_file(
+                session, item["path"], item["offset"], item["limit"], record_version=False,
+            )["output"]
+        except (OSError, UnicodeError, ValueError):
             continue
         text = text.encode()[: budget * 3].decode("utf-8", errors="ignore")
         attachment = HumanMessage(

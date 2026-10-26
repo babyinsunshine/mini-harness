@@ -118,6 +118,13 @@ uv run mini-harness --resume SESSION_ID
 读取结果包含 `has_more` 和 `next_offset`，有后续内容时用该 offset 继续读取。
 编辑结果包含局部 unified diff；长结果继续保存到 artifacts 并返回短预览。
 
+文件工具使用短时非阻塞锁：同项目的主智能体、子智能体和独立会话共享
+`.mini-harness/file-locks/`，冲突直接返回文件名和占用者 Session ID，异常也会释放锁。
+读取时记录完整文件的 SHA-256，保存在各会话 `runtime.sqlite` 的 `metadata.file_versions`。
+压缩后的自动附件读取不确认新版本，修改前仍按显式读取的记录检查。
+已有文件须先读取再修改，新文件可以直接创建；版本变化时拒绝覆盖，重新读取后再编辑。
+这套保护覆盖内置文件工具；Bash、MCP 和外部编辑器不自动遵守锁。
+
 进程控制只补充 `send_input(task_id, text, eof)` 和 `stop_task(task_id)`：
 
 - 每次 Bash 都启动新进程，继承启动环境时过滤 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、
@@ -418,6 +425,7 @@ src/mini_harness/
 │   ├── factory.py       # 显式列出模型可调用的工具
 │   ├── agents.py        # 父智能体的四个委派工具
 │   ├── files.py         # 文件读取、写入、精确替换
+│   ├── file_guard.py    # 文件锁与各会话的内容版本检查
 │   ├── plan.py          # 单会话当前计划的校验、整表更新与保存
 │   ├── skills.py        # 按需列出项目技能、加载指令与资源路径
 │   ├── mcp.py           # MCP 连接生命周期、按需发现与通用调用
