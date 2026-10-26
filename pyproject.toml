@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 anthropic = ["langchain-anthropic>=1,<2"]
+mcp = ["fastmcp-slim[client]>=4.0.11,<5"]
 # 兼容旧的 --extra openai 用法；适配器现已包含在基础依赖中。
 openai = []
 
