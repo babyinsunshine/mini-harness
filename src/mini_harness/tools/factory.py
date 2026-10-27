@@ -44,6 +44,7 @@ def create_tools(
 
         When has_more is true, continue with next_offset.
         Long selected output is saved to output_path; preview is only an excerpt.
+        Records the full file version. Read again if an edit reports a changed/busy file.
         """
         page = read_file(session, path, offset, limit)
         output = page.pop("output")
@@ -51,12 +52,19 @@ def create_tools(
 
     @tool("write_file")
     async def write_file_tool(path: str, content: str) -> str:
-        """Write complete UTF-8 content to a file. Existing content is replaced."""
+        """Write complete UTF-8 content. Read an existing file before replacing it.
+
+        New files can be created directly. Changed or locked files return an error;
+        read again before retrying. File versions are tracked separately per session.
+        """
         return write_file(session, path, content)
 
     @tool("edit_file")
     async def edit_file_tool(path: str, old_text: str, new_text: str) -> dict:
-        """Replace exactly one nonempty literal match. Read the file before editing."""
+        """Replace exactly one nonempty literal match. Read the file before editing.
+
+        If another agent changed or locked it, read again before retrying.
+        """
         return session.prepare_tool_output(edit_file(session, path, old_text, new_text))
 
     @tool
