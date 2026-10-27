@@ -119,6 +119,7 @@ async def test_read_tool_reports_how_to_continue_and_eof(tmp_path):
 def test_edit_result_shows_the_changed_lines(tmp_path):
     (tmp_path / "code.py").write_text("before\nkeep\n")
     with Session(tmp_path / "s", tmp_path) as session:
+        read_file(session, "code.py")
         result = edit_file(session, "code.py", "before", "after")
         assert "-before" in result and "+after" in result
         assert (tmp_path / "code.py").read_text() == "after\nkeep\n"

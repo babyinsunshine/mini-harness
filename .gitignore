@@ -9,6 +9,11 @@ __pycache__/
 .harness/
 .mini-harness/
 .env
+.mcp.json
+mcp*.json
+*.mcp.json
+!examples/mcp.windows-wsl.json
+!examples/mcp*.example.json
 .env.*
 !.env.example
 *.sqlite

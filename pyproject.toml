@@ -5,6 +5,7 @@ description = "A readable, modular CLI coding harness built on LangChain and Lan
 requires-python = ">=3.11"
 dependencies = [
     "langchain>=1.4.6,<2",
+    "langchain-openai>=1,<2",
     "langgraph>=1.2.16,<2",
     "langgraph-checkpoint-sqlite>=3.1.2,<4",
     "pydantic>=2,<3",
@@ -13,7 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 anthropic = ["langchain-anthropic>=1,<2"]
-openai = ["langchain-openai>=1,<2"]
+mcp = ["fastmcp-slim[client]>=4.0.11,<5"]
+# 兼容旧的 --extra openai 用法；适配器现已包含在基础依赖中。
+openai = []
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.12"]

@@ -69,6 +69,8 @@ def classify(tool_call: dict, session: Session) -> tuple[str, str]:
         return "allow", "Manage subagents owned by this session"
     if name == "list_skills":
         return "allow", "Read project skill descriptions"
+    if name == "list_mcp_tools":
+        return "allow", "Read configured MCP tool descriptions and schemas"
     if name == "load_skill":
         try:
             path = skill_path(session, args.get("name"))

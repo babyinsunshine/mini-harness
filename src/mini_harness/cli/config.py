@@ -12,8 +12,12 @@ from ..context.policy import ContextPolicy
 def build_parser():
     """定义命令行参数；恢复会话后的默认值由 resolve_settings 填入。"""
     cli_parser = argparse.ArgumentParser(description="A minimal LangGraph coding harness")
-    cli_parser.add_argument("--model", default=os.getenv("HARNESS_MODEL"), help="provider:model")
+    cli_parser.add_argument(
+        "--model", default=os.getenv("HARNESS_MODEL"),
+        help="provider:model (default: DeepSeek Flash)",
+    )
     cli_parser.add_argument("--base-url", help="Optional provider API endpoint")
+    cli_parser.add_argument("--mcp-config", help="Enable MCP servers from this JSON config")
     cli_parser.add_argument("-p", "--prompt", help="Run one prompt and exit")
     cli_parser.add_argument("--cwd", type=Path, default=Path.cwd())
     cli_parser.add_argument(
@@ -50,8 +54,9 @@ def build_parser():
 
 
 DEFAULTS = {
-    "model": None,
+    "model": "openai:deepseek-flash",
     "base_url": None,
+    "mcp_config": None,
     "context_window": ContextPolicy.window,
     "output_reserve": ContextPolicy.reserve,
     "micro_keep_rounds": ContextPolicy.micro_keep_rounds,
@@ -74,6 +79,11 @@ def resolve_settings(args, session_dir):
     for key, default in DEFAULTS.items():
         if getattr(args, key) is None:
             setattr(args, key, saved_settings.get(key, default))
+    # 只为 DeepSeek 补默认地址，其他供应商和显式地址保持原配置。
+    if args.base_url is None and args.model and args.model.startswith("openai:deepseek-"):
+        args.base_url = "https://api.deepseek.com"
+    if args.mcp_config is not None:
+        args.mcp_config = str(Path(args.mcp_config).expanduser().resolve())
 
 
 def list_sessions(sessions_dir):

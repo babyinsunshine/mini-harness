@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "windows": {
+      "command": "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$env:PYTHONWARNINGS='ignore:The logging capability is deprecated as of 2026-07-28'; & 'C:\\Users\\YOUR_USER\\.local\\bin\\uvx.exe' --python 3.14 windows-mcp serve"
+      ]
+    }
+  }
+}

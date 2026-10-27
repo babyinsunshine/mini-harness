@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from test_agent_cli import call
 from test_cli_permissions import cli_session
@@ -50,19 +51,33 @@ async def test_idle_child_approval_uses_the_same_cli_and_identifies_source(
         await asyncio.wait_for(running, 5)
 
 
-async def test_timeout_cancels_idle_approval_and_cli_accepts_new_chat(tmp_path, monkeypatch):
+@pytest.mark.parametrize("startup_delay", [0, 0.8])
+async def test_timeout_cancels_idle_approval_and_cli_accepts_new_chat(
+    tmp_path, monkeypatch, startup_delay,
+):
     release = asyncio.Event()
     outside = tmp_path / "not-approved.txt"
     parent_inputs = []
+    child_deadlines = []
+    real_timeout = asyncio.timeout
+
+    def capture_timeout(delay):
+        deadline = real_timeout(delay)
+        if delay == 60:
+            child_deadlines.append(deadline)
+        return deadline
+
+    monkeypatch.setattr(asyncio, "timeout", capture_timeout)
 
     async def reply(child, messages):
         if child:
+            await asyncio.sleep(startup_delay)
             await release.wait()
             return call("write_file", {"path": str(outside), "content": "no"}, "write")
         parent_inputs.append(messages)
         results = [m for m in messages if isinstance(m, ToolMessage)]
         if not results:
-            return call("spawn_agent", {"task": "Wait for approval", "timeout": 0.6}, "spawn")
+            return call("spawn_agent", {"task": "Wait for approval", "timeout": 60}, "spawn")
         return AIMessage(content="Parent ready")
 
     async with cli_session(tmp_path, monkeypatch, AgentModel(handler=reply)) as (
@@ -73,6 +88,8 @@ async def test_timeout_cancels_idle_approval_and_cli_accepts_new_chat(tmp_path, 
         release.set()
         async with asyncio.timeout(5):
             assert "Allow?" in await terminal.prompt()
+        # 等审批真正开始后，再让真实的 asyncio 超时到期，避免依赖机器启动速度。
+        child_deadlines[0].reschedule(asyncio.get_running_loop().time())
         assert await terminal.prompt() == "> "  # 超时先解除审批等待
         assert await terminal.prompt() == "> "  # 清理完成后通知父轮次
         assert not outside.exists()

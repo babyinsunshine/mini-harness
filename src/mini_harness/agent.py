@@ -27,6 +27,7 @@ from .prompts import load_prompt
 from .session import Session
 from .subagents import SubagentManager
 from .tools.factory import create_tools
+from .tools.mcp import connect_mcp
 from .tools.permissions import Permissions
 from .tools.processes import ProcessManager
 
@@ -35,15 +36,20 @@ class Harness:
     def __init__(
         self, session, processes, model, policy, checkpointer, max_steps,
         approve=None, process_timeout=3600, parent_permissions=None, full_access=False,
+        mcp_clients=None,
     ):
         self.session, self.processes = session, processes
+        self.mcp_clients = mcp_clients or {}
         self.context = ContextManager(session, model, policy)
         self.permissions = Permissions(
             session, approve, parent_permissions, full_access=full_access,
         )
         is_child = session.get("parent_session_id") is not None
         self.subagents = None if is_child else SubagentManager(self, max_steps, process_timeout)
-        tools = create_tools(session, processes, self.subagents, include_plan=not is_child)
+        tools = create_tools(
+            session, processes, self.subagents, include_plan=not is_child,
+            mcp_clients=self.mcp_clients,
+        )
         tool_tokens = sum(len(json.dumps(tool.args).encode()) // 3 + 100 for tool in tools)
         system_message = SystemMessage(
             content=load_prompt("system")
@@ -77,40 +83,50 @@ class Harness:
         cls, cwd, session_dir, model, policy=None,
         max_steps=1000, process_timeout=3600, approve=None,
         parent_session=None, parent_permissions=None, full_access=False,
+        mcp_config=None, parent_mcp=None,
     ):
         """打开会话；cwd 是首次工作目录，session_dir 保存会话数据。
 
         max_steps 按图节点计数；process_timeout 单位为秒；approve 是异步审批回调。
         parent_session / parent_permissions 仅供子智能体继承父身份与审批入口。
         full_access 显式跳过工具权限规则；子智能体沿用父权限。
+        mcp_config 显式启用配置中的 MCP 服务；parent_mcp 复用父连接。
         """
         with Session(Path(session_dir), Path(cwd)) as session:
             if parent_session is not None:
                 session.set("parent_session_id", parent_session.id)
                 session.set("parent_session_dir", str(parent_session.directory))
                 session.set("project_root", parent_session.get("project_root"))
-            async with ProcessManager(session, max_runtime_seconds=process_timeout) as processes:
-                async with AsyncSqliteSaver.from_conn_string(str(session.database)) as checkpointer:
-                    harness = cls(
-                        session,
-                        processes,
-                        model,
-                        policy or ContextPolicy(),
-                        checkpointer,
-                        max_steps,
-                        approve=approve,
-                        process_timeout=process_timeout,
-                        parent_permissions=parent_permissions,
-                        full_access=full_access,
-                    )
-                    try:
-                        yield harness
-                    finally:
-                        if harness.subagents is not None:
-                            await harness.subagents.interrupt()
-                        # 取消图后仍可能写入取消记录；先等写入结束，再关闭 SQLite。
-                        async with checkpointer.lock:
-                            pass
+            config_path = (
+                Path(mcp_config).expanduser().resolve() if mcp_config is not None
+                else None
+            )
+            async with (
+                ProcessManager(session, max_runtime_seconds=process_timeout) as processes,
+                AsyncSqliteSaver.from_conn_string(str(session.database)) as checkpointer,
+                connect_mcp(config_path, parent_mcp) as mcp_clients,
+            ):
+                harness = cls(
+                    session,
+                    processes,
+                    model,
+                    policy or ContextPolicy(),
+                    checkpointer,
+                    max_steps,
+                    approve=approve,
+                    process_timeout=process_timeout,
+                    parent_permissions=parent_permissions,
+                    full_access=full_access,
+                    mcp_clients=mcp_clients,
+                )
+                try:
+                    yield harness
+                finally:
+                    if harness.subagents is not None:
+                        await harness.subagents.interrupt()
+                    # 取消图后仍可能写入取消记录；先等写入结束，再关闭 SQLite。
+                    async with checkpointer.lock:
+                        pass
 
     def recover_missing_tool_results(self, messages):
         """补齐中断时缺失的工具结果，复用执行记录，不重新执行工具。"""

@@ -36,6 +36,7 @@ async def run_cli(args, session_dir):
         args.cwd, session_dir, model, policy,
         max_steps=args.max_steps, process_timeout=args.process_timeout,
         full_access=args.full_access,
+        mcp_config=args.mcp_config,
     ) as harness:
         harness.session.set(
             "config",

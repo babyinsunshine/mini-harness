@@ -3,6 +3,8 @@
 import json
 import sys
 
+from .usage import format_cache_usage
+
 
 def format_event(event) -> str:
     event_type = event["type"]
@@ -12,6 +14,8 @@ def format_event(event) -> str:
         details = [f"{event['elapsed']:.2f}s"]
         if usage := event["usage"]:
             details.append(f"{usage['input_tokens']:,} in / {usage['output_tokens']:,} out")
+        cached_tokens = usage.get("input_token_details", {}).get("cache_read")
+        details.append(format_cache_usage(usage.get("input_tokens", 0), cached_tokens))
         if event["finish_reason"]:
             details.append(event["finish_reason"])
         return "[model] " + " · ".join(details)
@@ -20,6 +24,11 @@ def format_event(event) -> str:
         target = tool_args.get("command", tool_args.get("path", tool_args.get(
             "task_id", tool_args.get("agent_id", tool_args.get("task", ""))
         )))
+        if event["name"] == "call_mcp_tool":
+            target = (
+                f"{tool_args.get('server', '?')}.{tool_args.get('tool_name', '?')} "
+                f"{tool_args.get('arguments', {})}"
+            )
         return f"[tool] {event['name']}: {str(target)[:160]}"
     if event_type == "tool_denied":
         return f"[denied] {event['name']}: {event['reason']}"

@@ -5,11 +5,14 @@ from langchain_core.tools import tool
 from ..session import Session
 from .agents import create_agent_tools
 from .files import edit_file, read_file, write_file
+from .mcp import create_mcp_tools
 from .plan import PlanStep, update_plan
 from .skills import list_skills, load_skill
 
 
-def create_tools(session: Session, processes, subagents=None, *, include_plan=True):
+def create_tools(
+    session: Session, processes, subagents=None, *, include_plan=True, mcp_clients=None,
+):
     """绑定会话资源；工具名和参数直接构成模型看到的调用协议。"""
     @tool("update_plan")
     async def update_plan_tool(plan: list[PlanStep], explanation: str | None = None) -> dict:
@@ -41,6 +44,7 @@ def create_tools(session: Session, processes, subagents=None, *, include_plan=Tr
 
         When has_more is true, continue with next_offset.
         Long selected output is saved to output_path; preview is only an excerpt.
+        Records the full file version. Read again if an edit reports a changed/busy file.
         """
         page = read_file(session, path, offset, limit)
         output = page.pop("output")
@@ -48,12 +52,19 @@ def create_tools(session: Session, processes, subagents=None, *, include_plan=Tr
 
     @tool("write_file")
     async def write_file_tool(path: str, content: str) -> str:
-        """Write complete UTF-8 content to a file. Existing content is replaced."""
+        """Write complete UTF-8 content. Read an existing file before replacing it.
+
+        New files can be created directly. Changed or locked files return an error;
+        read again before retrying. File versions are tracked separately per session.
+        """
         return write_file(session, path, content)
 
     @tool("edit_file")
     async def edit_file_tool(path: str, old_text: str, new_text: str) -> dict:
-        """Replace exactly one nonempty literal match. Read the file before editing."""
+        """Replace exactly one nonempty literal match. Read the file before editing.
+
+        If another agent changed or locked it, read again before retrying.
+        """
         return session.prepare_tool_output(edit_file(session, path, old_text, new_text))
 
     @tool
@@ -84,4 +95,6 @@ def create_tools(session: Session, processes, subagents=None, *, include_plan=Tr
         tools.append(update_plan_tool)
     if subagents is not None:
         tools.extend(create_agent_tools(subagents))
+    if mcp_clients:
+        tools.extend(create_mcp_tools(session, mcp_clients))
     return tools
