@@ -18,6 +18,11 @@ def build_parser():
     )
     cli_parser.add_argument("--base-url", help="Optional provider API endpoint")
     cli_parser.add_argument("--mcp-config", help="Enable MCP servers from this JSON config")
+    cli_parser.add_argument(
+        "--sandbox", action=argparse.BooleanOptionalAction, default=None,
+        help="Restrict file access with Bubblewrap (Linux/WSL2; default: off)",
+    )
+    cli_parser.add_argument("--sandbox-config", help="User JSON policy; requires --sandbox")
     cli_parser.add_argument("-p", "--prompt", help="Run one prompt and exit")
     cli_parser.add_argument("--cwd", type=Path, default=Path.cwd())
     cli_parser.add_argument(
@@ -27,7 +32,7 @@ def build_parser():
     cli_parser.add_argument("--list-sessions", action="store_true")
     cli_parser.add_argument(
         "--full-access", action="store_true",
-        help="Allow all tool calls without approval, including normally denied actions",
+        help="Skip ordinary tool approvals; sandbox rules and explicit sandbox approvals remain",
     )
     cli_parser.add_argument(
         "--context-window",
@@ -57,6 +62,8 @@ DEFAULTS = {
     "model": "openai:deepseek-flash",
     "base_url": None,
     "mcp_config": None,
+    "sandbox": False,
+    "sandbox_config": None,
     "context_window": ContextPolicy.window,
     "output_reserve": ContextPolicy.reserve,
     "micro_keep_rounds": ContextPolicy.micro_keep_rounds,
@@ -82,8 +89,9 @@ def resolve_settings(args, session_dir):
     # 只为 DeepSeek 补默认地址，其他供应商和显式地址保持原配置。
     if args.base_url is None and args.model and args.model.startswith("openai:deepseek-"):
         args.base_url = "https://api.deepseek.com"
-    if args.mcp_config is not None:
-        args.mcp_config = str(Path(args.mcp_config).expanduser().resolve())
+    for name in ("mcp_config", "sandbox_config"):
+        if getattr(args, name) is not None:
+            setattr(args, name, str(Path(getattr(args, name)).expanduser().resolve()))
 
 
 def list_sessions(sessions_dir):

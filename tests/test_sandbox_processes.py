@@ -73,7 +73,10 @@ async def test_bash_cwd_channel_handles_shell_characters_and_sources_env(process
     assert (await processes.run("pwd"))["preview"].strip() == str(folder)
 
 
-async def test_bash_private_temp_does_not_write_host_temp_files(processes):
+@pytest.mark.parametrize("grant_session_directory", [False, True])
+async def test_bash_private_temp_does_not_write_host_temp_files(processes, grant_session_directory):
+    if grant_session_directory:
+        processes.session.sandbox.grant([str(processes.session.directory)])
     code = "import tempfile; f=tempfile.NamedTemporaryFile(" \
            "prefix='mini-harness-sandbox-test-',delete=False); " \
            "f.write(b'temporary'); f.close(); print(f.name)"
@@ -156,3 +159,38 @@ def test_missing_runtime_does_not_fall_back_to_unsandboxed(tmp_path, monkeypatch
     monkeypatch.setattr(shutil, "which", lambda _: None)
     with pytest.raises(RuntimeError, match="[Bb]ubblewrap|bwrap"):
         Sandbox.load(tmp_path).require_runtime()
+
+
+async def test_graph_approval_enables_real_sandbox_write_only_after_grant(tmp_path, bubblewrap):
+    from langchain_core.messages import AIMessage, ToolMessage
+    from test_agent_cli import ScriptedModel, call, consume
+
+    from mini_harness.agent import Harness
+
+    project, shared = tmp_path / "project", tmp_path / "shared"
+    project.mkdir()
+    shared.mkdir()
+    target = shared / "output.txt"
+    command = f"printf approved > {shlex.quote(str(target))}"
+    approvals = []
+
+    async def approve(tool_call, reason):
+        assert not target.exists()
+        approvals.append(tool_call["name"])
+        return True
+
+    model = ScriptedModel(responses=[
+        call("bash", {"command": command}, "blocked"),
+        call("request_sandbox_access", {"paths": [str(shared)], "reason": "Update shared code"},
+             "grant"),
+        call("bash", {"command": command}, "allowed"),
+        AIMessage(content="Done"),
+    ])
+    async with Harness.open(project, tmp_path / "session", model, sandbox=True,
+                            full_access=True, approve=approve) as harness:
+        await consume(harness, "Update the external file")
+    results = {m.tool_call_id: m for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    assert results["blocked"].status == "error"
+    assert results["allowed"].status == "success"
+    assert target.read_text() == "approved"
+    assert approvals == ["request_sandbox_access"]

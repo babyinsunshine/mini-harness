@@ -79,6 +79,28 @@ class Sandbox:
             "extra_grants": "Valid only until harness exits; not restored from history.",
         }
 
+    def permission_request(self, tool_call: dict) -> tuple[str, str] | None:
+        """识别扩权和临时绕过；它们必须明确审批，不复用普通会话信任。"""
+        name, args = tool_call["name"], tool_call.get("args", {})
+        if name == "request_sandbox_access":
+            if not self.allow_write_requests:
+                return "deny", "Sandbox write-access requests are disabled"
+            try:
+                paths = self.write_paths(args.get("paths", []))
+            except (ValueError, TypeError, PermissionError) as error:
+                return "deny", str(error)
+            scope = "Additional writable directories until exit: " + ", ".join(map(str, paths))
+        elif name == "bash" and args.get("bypass_sandbox"):
+            if not self.allow_bypass:
+                return "deny", "Unsandboxed execution requests are disabled"
+            scope = "Run this command and its children UNSANDBOXED once; deny paths also lifted"
+        else:
+            return None
+        reason = args.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return "deny", "Sandbox permission requests require a reason"
+        return "ask", f"{scope}. Reason: {reason}"
+
     def require_runtime(self) -> str:
         """显式开启后，缺少隔离能力就报错，不能退回普通执行。"""
         executable = shutil.which("bwrap")
@@ -93,12 +115,14 @@ class Sandbox:
         command = [
             self.require_runtime(), "--unshare-all", "--share-net", "--unshare-user",
             "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
-            "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
-            "--tmpfs", str(temporary), "--setenv", "TMPDIR", str(temporary),
+            "--ro-bind", "/", "/",
         ]
         writable = {self.project_root, *self.extra_write_paths, env_file, cwd_file}
         for path in sorted(writable, key=lambda path: (len(path.parts), str(path))):
             command += ["--bind", str(path), str(path)]
+        # 专用挂载放在可写父目录之后，避免父目录覆盖它们。
+        command += ["--proc", "/proc", "--dev", "/dev",
+                    "--tmpfs", str(temporary), "--setenv", "TMPDIR", str(temporary)]
         if self.config_path is not None:
             command += ["--ro-bind", str(self.config_path), str(self.config_path)]
         # 遮蔽原内容；先处理父目录，已被遮蔽的子路径无需重复挂载。

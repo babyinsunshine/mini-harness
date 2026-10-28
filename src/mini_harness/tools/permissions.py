@@ -34,15 +34,31 @@ class Permissions:
     async def check(self, tool_call):
         """允许时返回 None；拒绝时返回未执行的 ToolMessage。"""
         authority = self.parent or self
-        if authority.full_access:
+        sandbox_request = (
+            self.session.sandbox.permission_request(tool_call)
+            if self.session.sandbox is not None else None
+        )
+        if sandbox_request is not None:
+            action, reason = sandbox_request
+            if action == "ask" and tool_call["name"] == "bash" and not authority.full_access:
+                ordinary_action, ordinary_reason = _bash_rule(
+                    tool_call.get("args", {}).get("command"), self.session, apply_sandbox=False,
+                )
+                if ordinary_action == "deny":
+                    action, reason = ordinary_action, ordinary_reason
+        elif authority.full_access:
             action, reason = "allow", "Full access enabled"
         else:
             action, reason = classify(tool_call, self.session)
         allowed = action == "allow"
-        if action == "ask" and authority.session_trusted:
+        if action == "ask" and sandbox_request is None and authority.session_trusted:
             allowed = True
         elif action == "ask" and authority.approve is not None:
-            request = {**tool_call, "agent_id": self.session.id} if self.parent else tool_call
+            request = dict(tool_call)
+            if sandbox_request is not None:
+                request["sandbox_request"] = True
+            if self.parent:
+                request["agent_id"] = self.session.id
             allowed = await authority.approve(request, reason)
         self.session.record(
             "permission", call_id=tool_call["id"], action=action, allowed=allowed, reason=reason
@@ -84,14 +100,15 @@ def classify(tool_call: dict, session: Session) -> tuple[str, str]:
     return "ask", "This tool requires approval"
 
 
-def _file_rule(path, session: Session, *, writing: bool) -> tuple[str, str]:
+def _file_rule(path, session: Session, *, writing: bool, apply_sandbox=True) -> tuple[str, str]:
     """先保护系统/会话记录，再检查固定目录范围；cd 不扩大权限。"""
     if not isinstance(path, str) or not path:
         return "ask", "Missing or invalid path"
     target = session.resolve_path(path)
-    if session.sandbox is not None:
+    sandbox = session.sandbox if apply_sandbox else None
+    if sandbox is not None:
         try:
-            session.sandbox.check_path(
+            sandbox.check_path(
                 target, writing=writing, env_file=session.directory / "env.sh",
             )
         except PermissionError as error:
@@ -106,7 +123,7 @@ def _file_rule(path, session: Session, *, writing: bool) -> tuple[str, str]:
             return "deny", "Overwriting session records is forbidden"
         if target == (session.directory / "env.sh").resolve() or ".git" in target.parts:
             return "ask", "Changing executable environment or Git configuration requires approval"
-    if session.sandbox is not None:
+    if sandbox is not None:
         return "allow", "File is within sandbox rules"
     roots = (Path(session.get("project_root")), session.directory)
     if any(target.is_relative_to(root) for root in roots):
@@ -141,7 +158,7 @@ def _dangerous(words: list[str], session: Session) -> bool:
     return False
 
 
-def _bash_rule(command, session: Session) -> tuple[str, str]:
+def _bash_rule(command, session: Session, *, apply_sandbox=True) -> tuple[str, str]:
     """检查简单 Bash；复杂语法只做明显危险检查，然后交给用户审批。"""
     if not isinstance(command, str) or not command.strip():
         return "ask", "Missing or invalid command"
@@ -160,7 +177,9 @@ def _bash_rule(command, session: Session) -> tuple[str, str]:
             if _dangerous(group, session):
                 return "deny", "Destructive command is forbidden"
             if ">" in token and index + 1 < len(tokens):
-                action, reason = _file_rule(tokens[index + 1], session, writing=True)
+                action, reason = _file_rule(
+                    tokens[index + 1], session, writing=True, apply_sandbox=apply_sandbox,
+                )
                 if action == "deny":
                     return action, reason
             group = []
@@ -184,10 +203,10 @@ def _bash_rule(command, session: Session) -> tuple[str, str]:
         options = args[:args.index("--")] if "--" in args else args
         if operation in {"diff", "show"} and not {"--no-ext-diff", "--no-textconv"} <= set(options):
             return "ask", "Git diff/show requires --no-ext-diff --no-textconv"
-    return _read_arguments(name, args, session)
+    return _read_arguments(name, args, session, apply_sandbox=apply_sandbox)
 
 
-def _read_arguments(name: str, args: list[str], session: Session) -> tuple[str, str]:
+def _read_arguments(name, args, session: Session, *, apply_sandbox=True) -> tuple[str, str]:
     """只接受已知只读选项；文件参数也必须位于允许范围内。"""
     pattern_seen = name != "rg" or "--files" in args
     index = 0
@@ -217,9 +236,11 @@ def _read_arguments(name: str, args: list[str], session: Session) -> tuple[str, 
         if not pattern_seen:
             pattern_seen = True
             continue
-        action, reason = _file_rule(arg, session, writing=False)
+        action, reason = _file_rule(arg, session, writing=False, apply_sandbox=apply_sandbox)
         if action != "allow":
             return action, reason
-    if _file_rule(str(session.cwd), session, writing=False)[0] != "allow":
+    if _file_rule(
+        str(session.cwd), session, writing=False, apply_sandbox=apply_sandbox,
+    )[0] != "allow":
         return "ask", "Working directory is outside the allowed scope"
     return "allow", "Simple read-only command inside the allowed scope"

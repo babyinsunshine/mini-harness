@@ -94,7 +94,10 @@ def mcp_call(call_id="increment"):
     }, call_id)
 
 
-async def test_mcp_discovers_schemas_keeps_session_and_cleans_up(mcp_project, monkeypatch):
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_mcp_discovers_schemas_keeps_session_and_cleans_up(mcp_project, monkeypatch, sandbox):
+    if sandbox:
+        monkeypatch.setattr("mini_harness.sandbox.Sandbox.require_runtime", lambda self: "bwrap")
     monkeypatch.setenv("OPENAI_API_KEY", "test-value-must-not-reach-mcp")
     model = ScriptedModel(responses=[
         call("list_mcp_tools", {}, "servers"),
@@ -103,7 +106,7 @@ async def test_mcp_discovers_schemas_keeps_session_and_cleans_up(mcp_project, mo
     ])
     async with Harness.open(mcp_project, mcp_project / "session", model,
                             mcp_config=mcp_project / ".mcp.json",
-                            full_access=True) as harness:
+                            full_access=True, sandbox=sandbox) as harness:
         assert await consume(harness, "Discover and call MCP") == "Done"
         messages = model.seen[-1]
         results = {m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)}

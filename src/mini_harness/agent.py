@@ -24,6 +24,7 @@ from .graph.builder import build_graph
 from .graph.nodes import INTERRUPTED_TOOL
 from .graph.types import Resources
 from .prompts import load_prompt
+from .sandbox import Sandbox
 from .session import Session
 from .subagents import SubagentManager
 from .tools.factory import create_tools
@@ -59,6 +60,8 @@ class Harness:
                 f"Environment file: {processes.env_file}\n"
             )
         )
+        if session.sandbox is not None:
+            system_message.content += load_prompt("sandbox")
         if is_child:
             system_message.content += (
                 f"Parent session ID: {session.get('parent_session_id')}\n"
@@ -84,19 +87,26 @@ class Harness:
         max_steps=1000, process_timeout=3600, approve=None,
         parent_session=None, parent_permissions=None, full_access=False,
         mcp_config=None, parent_mcp=None,
+        sandbox=False, sandbox_config=None, parent_sandbox=None,
     ):
         """打开会话；cwd 是首次工作目录，session_dir 保存会话数据。
 
         max_steps 按图节点计数；process_timeout 单位为秒；approve 是异步审批回调。
         parent_session / parent_permissions 仅供子智能体继承父身份与审批入口。
-        full_access 显式跳过工具权限规则；子智能体沿用父权限。
+        full_access 跳过普通审批；沙箱边界及其明确审批仍有效，子智能体沿用父权限。
         mcp_config 显式启用配置中的 MCP 服务；parent_mcp 复用父连接。
+        sandbox 开启文件沙箱；子智能体复用 parent_sandbox，不恢复额外授权。
         """
         with Session(Path(session_dir), Path(cwd)) as session:
             if parent_session is not None:
                 session.set("parent_session_id", parent_session.id)
                 session.set("parent_session_dir", str(parent_session.directory))
                 session.set("project_root", parent_session.get("project_root"))
+            session.sandbox = parent_sandbox
+            if sandbox and session.sandbox is None:
+                session.sandbox = Sandbox.load(Path(session.get("project_root")), sandbox_config)
+            if session.sandbox is not None:
+                session.sandbox.require_runtime()
             config_path = (
                 Path(mcp_config).expanduser().resolve() if mcp_config is not None
                 else None
