@@ -1,6 +1,8 @@
 """文件访问策略和本次运行的额外授权；不写入会话数据库。"""
 
 import json
+import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,3 +78,43 @@ class Sandbox:
             "deny_paths": list(map(str, self.deny_paths)),
             "extra_grants": "Valid only until harness exits; not restored from history.",
         }
+
+    def require_runtime(self) -> str:
+        """显式开启后，缺少隔离能力就报错，不能退回普通执行。"""
+        executable = shutil.which("bwrap")
+        if sys.platform != "linux" or executable is None:
+            raise RuntimeError("Sandbox requires Linux/WSL2 and Bubblewrap (install bubblewrap)")
+        return executable
+
+    def command(self, argv: list[str], *, env_file: Path, cwd_file: Path) -> list[str]:
+        """主机只读、指定路径可写；共享网络，隔离 PID 并随父进程退出。"""
+        temporary = env_file.parent / "tmp"
+        temporary.mkdir(exist_ok=True)
+        command = [
+            self.require_runtime(), "--unshare-all", "--share-net", "--unshare-user",
+            "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
+            "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
+            "--tmpfs", str(temporary), "--setenv", "TMPDIR", str(temporary),
+        ]
+        writable = {self.project_root, *self.extra_write_paths, env_file, cwd_file}
+        for path in sorted(writable, key=lambda path: (len(path.parts), str(path))):
+            command += ["--bind", str(path), str(path)]
+        if self.config_path is not None:
+            command += ["--ro-bind", str(self.config_path), str(self.config_path)]
+        # 遮蔽原内容；先处理父目录，已被遮蔽的子路径无需重复挂载。
+        masked = []
+        for path in sorted(set(self.deny_paths), key=lambda path: len(path.parts)):
+            if any(path.is_relative_to(parent) for parent in masked):
+                continue
+            if not path.exists():
+                raise ValueError(f"Sandbox deny path does not exist: {path}")
+            if path.is_dir():
+                command += ["--tmpfs", str(path), "--chmod", "000", str(path),
+                            "--remount-ro", str(path)]
+            else:
+                empty = env_file.parent / ".sandbox-denied"
+                empty.touch(mode=0, exist_ok=True)
+                empty.chmod(0)
+                command += ["--ro-bind", str(empty), str(path)]
+            masked.append(path)
+        return [*command, "--", *map(str, argv)]

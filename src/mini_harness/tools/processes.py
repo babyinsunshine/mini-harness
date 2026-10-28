@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shlex
 import signal
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,7 +51,10 @@ class ProcessManager:
                 self.completion_events.put_nowait(record)
         self.session.set("processes", saved_tasks)
 
-    async def run(self, command: str, timeout: float = 120, run_in_background: bool = False):
+    async def run(
+        self, command: str, timeout: float = 120, run_in_background: bool = False,
+        *, bypass_sandbox: bool = False,
+    ):
         """timeout 是前台等待秒数；超时或 run_in_background=True 时保留后台进程。"""
         if timeout <= 0:
             raise ValueError("timeout must be positive")
@@ -58,30 +62,30 @@ class ProcessManager:
             task_id = str(uuid4())
             output_path = self.session.artifacts / f"process-{task_id}.log"
             cwd_file = self.session.artifacts / f"process-{task_id}.cwd"
-            with output_path.open("wb") as output_stream, cwd_file.open("wb") as cwd_stream:
-                # EXIT also runs for `exit N` and failed commands. Command text stays
-                # a positional argument; metadata paths never become shell code.
+            cwd_file.touch()
+            with output_path.open("wb") as output_stream:
+                # EXIT also runs for `exit N` and failed commands. Quote the metadata
+                # path separately; command text stays a positional argument.
+                cwd_report = f"pwd -P > {shlex.quote(str(cwd_file))}"
                 script = (
-                    f"trap 'pwd -P >&{cwd_stream.fileno()}' EXIT\n"
+                    f"trap {shlex.quote(cwd_report)} EXIT\n"
                     'source "$1" || exit $?\n'
                     'eval -- "$2"'
                 )
+                argv = ["bash", "--noprofile", "--norc", "-c", script,
+                        "mini-harness", self.env_file, command]
+                if self.session.sandbox is not None and not bypass_sandbox:
+                    argv = self.session.sandbox.command(
+                        argv, env_file=self.env_file, cwd_file=cwd_file,
+                    )
                 process = await asyncio.create_subprocess_exec(
-                    "bash",
-                    "--noprofile",
-                    "--norc",
-                    "-c",
-                    script,
-                    "mini-harness",
-                    self.env_file,
-                    command,
+                    *map(str, argv),
                     cwd=self.session.cwd,
                     env=self.environment,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=output_stream,
                     stderr=asyncio.subprocess.STDOUT,
                     start_new_session=True,
-                    pass_fds=(cwd_stream.fileno(),),
                 )
             task = ProcessTask(task_id, process, output_path, cwd_file, command)
             self.tasks[task_id] = task
