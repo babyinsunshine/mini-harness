@@ -16,6 +16,8 @@ class Sandbox:
     allow_bypass: bool = False
     config_path: Path | None = None
     extra_write_paths: set[Path] = field(default_factory=set)
+    session_directory: Path | None = None
+    runtime_path: Path | None = field(default=None, init=False, repr=False)
 
     @property
     def blocked_paths(self) -> tuple[Path, ...]:
@@ -58,10 +60,13 @@ class Sandbox:
             raise PermissionError(f"Sandbox denies access: {path}")
         if not writing:
             return
-        if path == self.config_path:
-            raise PermissionError(f"Sandbox configuration is read-only: {path}")
+        if path in (self.config_path, self.runtime_path):
+            raise PermissionError(f"Sandbox configuration/runtime is read-only: {path}")
         if env_file is not None and path == env_file.resolve():
             return
+        state_directory = self.session_directory or (env_file.parent if env_file else None)
+        if state_directory is not None and path.is_relative_to(state_directory):
+            raise PermissionError(f"Sandbox session management files are read-only: {path}")
         if not any(path.is_relative_to(root) for root in (
             self.project_root, *self.extra_write_paths,
         )):
@@ -79,13 +84,20 @@ class Sandbox:
         return resolved
 
     def grant(self, paths: list[str]):
-        self.extra_write_paths.update(self.write_paths(paths))
+        resolved = set(self.write_paths(paths))
+        if resolved != {Path(path).expanduser().absolute() for path in paths}:
+            raise PermissionError("Approved directory changed; request access again")
+        for path in sorted(resolved, key=lambda path: len(path.parts)):
+            roots = (self.project_root, *self.extra_write_paths)
+            if not any(path.is_relative_to(root) for root in roots):
+                self.extra_write_paths.add(path)
 
     def status(self):
         """放入运行上下文，旧对话中的授权文字不代表当前有效权限。"""
         return {
             "write_paths": sorted(map(str, (self.project_root, *self.extra_write_paths))),
             "deny_paths": list(map(str, self.blocked_paths)),
+            "read_only_session": str(self.session_directory) if self.session_directory else None,
             "extra_grants": "Valid only until harness exits; not restored from history.",
         }
 
@@ -99,6 +111,8 @@ class Sandbox:
                 paths = self.write_paths(args.get("paths", []))
             except (ValueError, TypeError, PermissionError) as error:
                 return "deny", str(error)
+            # 固定审批展示的实际目录，执行阶段不能再追随原始符号链接。
+            args["paths"] = list(map(str, paths))
             scope = "Additional writable directories until exit: " + ", ".join(map(str, paths))
         elif name == "bash" and args.get("bypass_sandbox"):
             if not self.allow_bypass:
@@ -113,10 +127,15 @@ class Sandbox:
 
     def require_runtime(self) -> str:
         """显式开启后，缺少隔离能力就报错，不能退回普通执行。"""
-        executable = shutil.which("bwrap")
-        if sys.platform != "linux" or executable is None:
-            raise RuntimeError("Sandbox requires Linux/WSL2 and Bubblewrap (install bubblewrap)")
-        return executable
+        if self.runtime_path is None:
+            executable = shutil.which("bwrap")
+            if sys.platform != "linux" or executable is None:
+                raise RuntimeError(
+                    "Sandbox requires Linux/WSL2 and Bubblewrap (install bubblewrap)"
+                )
+            # 固定真实入口，后续项目中的同名程序或被替换的 PATH 链接不能接管启动。
+            self.runtime_path = Path(executable).resolve()
+        return str(self.runtime_path)
 
     def command(self, argv: list[str], *, env_file: Path, cwd_file: Path) -> list[str]:
         """主机只读、指定路径可写；共享网络，隔离 PID 并随父进程退出。"""
@@ -127,14 +146,34 @@ class Sandbox:
             "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
             "--ro-bind", "/", "/",
         ]
-        writable = {self.project_root, *self.extra_write_paths, env_file, cwd_file}
+        writable = {self.project_root, *self.extra_write_paths}
+        if any(path.resolve() != path for path in writable):
+            raise PermissionError("Writable directory changed; request access again")
         for path in sorted(writable, key=lambda path: (len(path.parts), str(path))):
+            command += ["--bind", str(path), str(path)]
+        state_directory = self.session_directory or env_file.parent
+        protected_files = [
+            path for path in (self.config_path, self.runtime_path) if path is not None
+        ]
+        protected = [*self.blocked_paths, state_directory, *protected_files]
+        # 只遮蔽目标还不够：固定可写祖先，阻止移走父目录后在下次调用读取旧内容。
+        ancestors = set()
+        for path in protected:
+            for parent in path.parents:
+                if parent in writable or parent.is_relative_to(state_directory):
+                    continue
+                if any(parent.is_relative_to(root) for root in writable):
+                    ancestors.add(parent)
+        for path in sorted(ancestors, key=lambda path: len(path.parts)):
+            command += ["--bind", str(path), str(path)]
+        command += ["--ro-bind", str(state_directory), str(state_directory)]
+        for path in (env_file, cwd_file):
             command += ["--bind", str(path), str(path)]
         # 专用挂载放在可写父目录之后，避免父目录覆盖它们。
         command += ["--proc", "/proc", "--dev", "/dev",
                     "--tmpfs", str(temporary), "--setenv", "TMPDIR", str(temporary)]
-        if self.config_path is not None:
-            command += ["--ro-bind", str(self.config_path), str(self.config_path)]
+        for path in protected_files:
+            command += ["--ro-bind", str(path), str(path)]
         # 遮蔽原内容；先处理父目录，已被遮蔽的子路径无需重复挂载。
         masked = []
         for path in sorted(set(self.blocked_paths), key=lambda path: len(path.parts)):

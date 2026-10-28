@@ -111,10 +111,12 @@ async def validate_response(state: State, runtime: Runtime[Resources]):
 
 async def check_permission(state: State, runtime: Runtime[Resources]):
     """每次只审批当前调用，使下一个调用按执行后的 cwd 重新检查。"""
-    tool_call = state["pending_calls"][0]
+    original_call = state["pending_calls"][0]
+    # 权限校验会规范化扩权路径；用副本，明确将获准参数交给后续执行。
+    tool_call = {**original_call, "args": dict(original_call["args"])}
     denial_result = await runtime.context.permissions.check(tool_call)
     if denial_result is None:
-        return {"approved": True}
+        return {"approved": True, "pending_calls": [tool_call, *state["pending_calls"][1:]]}
     get_stream_writer()({
         "type": "tool_denied", "call_id": tool_call["id"],
         "name": tool_call["name"], "reason": denial_result.content,

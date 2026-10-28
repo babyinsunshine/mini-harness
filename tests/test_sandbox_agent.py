@@ -245,3 +245,43 @@ def test_cli_sandbox_settings_resume_and_explicit_disable(paths, tmp_path):
     disabled = parser.parse_args(["--resume", "saved", "--no-sandbox"])
     resolve_settings(disabled, directory)
     assert disabled.sandbox is False
+
+
+async def test_changing_symlink_during_approval_cannot_change_granted_directory(paths, tmp_path):
+    project, shared, config = paths
+    hidden = tmp_path / "not-shown"
+    hidden.mkdir()
+    alias = project / "link"
+    alias.symlink_to(shared, target_is_directory=True)
+
+    async def approve(tool_call, reason):
+        assert str(shared) in reason and str(hidden) not in reason
+        alias.unlink()
+        alias.symlink_to(hidden, target_is_directory=True)
+        return True
+
+    model = ScriptedModel(responses=[request_access(alias), AIMessage(content="Done")])
+    async with Harness.open(project, tmp_path / "session", model, sandbox=True,
+                            sandbox_config=config, full_access=True, approve=approve) as harness:
+        await consume(harness, "Request the linked directory")
+        assert shared in harness.session.sandbox.extra_write_paths
+        assert hidden not in harness.session.sandbox.extra_write_paths
+
+
+async def test_approved_canonical_directory_replaced_with_symlink_is_rejected(paths, tmp_path):
+    project, shared, config = paths
+    hidden = tmp_path / "not-shown"
+    hidden.mkdir()
+
+    async def approve(tool_call, reason):
+        shared.rename(tmp_path / "old-shared")
+        shared.symlink_to(hidden, target_is_directory=True)
+        return True
+
+    model = ScriptedModel(responses=[request_access(shared), AIMessage(content="Done")])
+    async with Harness.open(project, tmp_path / "session", model, sandbox=True,
+                            sandbox_config=config, full_access=True, approve=approve) as harness:
+        await consume(harness, "Request directory")
+        assert harness.session.sandbox.extra_write_paths == set()
+        result = next(m for m in model.seen[-1] if isinstance(m, ToolMessage))
+        assert result.status == "error"

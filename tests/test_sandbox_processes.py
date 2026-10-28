@@ -204,3 +204,86 @@ async def test_wsl_windows_execution_bridge_is_blocked_inside_sandbox(processes)
     )
     assert result["exit_code"] != 0
     assert "HARNESS_INTEROP_MUST_BE_BLOCKED" not in result["preview"]
+
+
+async def test_renaming_denied_file_ancestor_cannot_expose_it_in_later_calls(processes):
+    from mini_harness.tools.files import read_file
+
+    parent = processes.session.cwd / "outer" / "private"
+    parent.mkdir(parents=True)
+    secret = parent / "secret.txt"
+    secret.write_text("PRIVATE ANCESTOR FIXTURE")
+    processes.session.sandbox.deny_paths = (secret,)
+    result = await processes.run(
+        "mv outer moved && mkdir -p outer/private && touch outer/private/secret.txt",
+    )
+    assert result["exit_code"] != 0
+    assert secret.read_text() == "PRIVATE ANCESTOR FIXTURE"
+    assert not (processes.session.cwd / "moved").exists()
+    result = await processes.run("cat outer/private/secret.txt")
+    assert result["exit_code"] != 0 and "PRIVATE ANCESTOR FIXTURE" not in result["preview"]
+    with pytest.raises(PermissionError):
+        read_file(processes.session, str(secret))
+    assert (await processes.run("printf allowed > outer/private/allowed.txt"))["exit_code"] == 0
+
+
+async def test_config_parent_rename_cannot_replace_original_policy(processes):
+    parent = processes.session.cwd / "policies"
+    parent.mkdir()
+    config = parent / "sandbox.json"
+    original = '{"allow_bypass": false}'
+    config.write_text(original)
+    processes.session.sandbox = Sandbox.load(processes.session.cwd, config)
+    result = await processes.run(
+        "mv policies saved && mkdir policies && printf '{}' > policies/sandbox.json",
+    )
+    assert result["exit_code"] != 0
+    assert config.read_text() == original
+    assert not (processes.session.cwd / "saved").exists()
+
+
+async def test_session_metadata_is_protected_when_session_is_inside_project(tmp_path, bubblewrap):
+    project = tmp_path / "project"
+    project.mkdir()
+    with Session(project / "session", project) as session:
+        session.sandbox = Sandbox.load(project)
+        session.set("sentinel", "original")
+        query = "UPDATE metadata SET value='\"tampered\"' WHERE key='sentinel'"
+        code = "import sqlite3; " \
+               f"c=sqlite3.connect({str(session.runtime_database)!r}); " \
+               f"c.execute({query!r}); " \
+               "c.commit()"
+        async with ProcessManager(session) as manager:
+            result = await manager.run(f"/usr/bin/python3 -c {shlex.quote(code)}")
+            assert result["exit_code"] != 0
+            assert session.get("sentinel") == "original"
+            result = await manager.run(
+                f"printf 'export TEST_VALUE=ok' > {shlex.quote(str(manager.env_file))}",
+            )
+            assert result["exit_code"] == 0
+
+
+async def test_runtime_binary_is_pinned_before_project_can_replace_path(processes, monkeypatch):
+    import os
+
+    original = Path(shutil.which("bwrap")).resolve()
+    directory = processes.session.cwd / "bin"
+    directory.mkdir()
+    alias = directory / "bwrap"
+    alias.symlink_to(original)
+    monkeypatch.setenv("PATH", f"{directory}:{os.environ['PATH']}")
+    processes.session.sandbox.require_runtime()
+    alias.unlink()
+    alias.write_text("#!/bin/sh\nprintf BYPASSED\n")
+    alias.chmod(0o755)
+    result = await processes.run("printf safe")
+    assert result["exit_code"] == 0 and result["preview"] == "safe"
+
+
+async def test_redundant_project_grant_does_not_block_directory_rename(processes):
+    directory = processes.session.cwd / "source"
+    directory.mkdir()
+    processes.session.sandbox.grant([str(directory)])
+    result = await processes.run("mv source renamed")
+    assert result["exit_code"] == 0
+    assert (processes.session.cwd / "renamed").is_dir()

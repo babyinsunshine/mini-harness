@@ -36,12 +36,12 @@
 
 **Interfaces:** `Session.sandbox` defaults to `None`; `Sandbox.load(project_root, config_path=None)` loads the three JSON fields in the spec; `check_path(path, *, writing=False, env_file=None)` raises `PermissionError` on violations. `write_paths(paths)` validates and canonicalizes existing directories; `grant(paths)` adds them in memory. `status()` supplies serializable current rules for runtime context.
 
-- [ ] Write failing tests: project writes succeed; outside writes fail; outside reads succeed; deny paths block reads/writes even inside project or granted directories; symlinks follow their actual target; config remains protected; env.sh is the sole session-file exception.
-- [ ] Add tests showing blocked skills are absent from discovery, direct loading fails, and blocked AGENTS.md content does not enter runtime context.
-- [ ] Run `uv run --no-sync pytest tests/test_sandbox.py -q`; observe failure before production code exists.
-- [ ] Implement the policy and call it from file access, skill loading, permission classification and AGENTS.md injection; compaction already reads through file tools.
-- [ ] Run the focused tests plus `tests/test_session_tools.py`, `tests/test_skills.py`, `tests/test_permissions.py`, `tests/test_context.py`; expect all passing.
-- [ ] Commit `feat: add shared sandbox path policy`.
+- [x] Write failing tests: project writes succeed; outside writes fail; outside reads succeed; deny paths block reads/writes even inside project or granted directories; symlinks follow their actual target; config remains protected; env.sh is the sole session-file exception.
+- [x] Add tests showing blocked skills are absent from discovery, direct loading fails, and blocked AGENTS.md content does not enter runtime context.
+- [x] Run `uv run --no-sync pytest tests/test_sandbox.py -q`; observe failure before production code exists.
+- [x] Implement the policy and call it from file access, skill loading, permission classification and AGENTS.md injection; compaction already reads through file tools.
+- [x] Run the focused tests plus `tests/test_session_tools.py`, `tests/test_skills.py`, `tests/test_permissions.py`, `tests/test_context.py`; expect all passing.
+- [x] Commit `feat: add shared sandbox path policy`.
 
 ### Task 2: Restricted Bash processes
 
@@ -49,13 +49,13 @@
 
 **Interfaces:** `Sandbox.require_runtime()` validates Linux and the Bubblewrap executable; `Sandbox.command(argv, *, env_file, cwd_file)` returns argv for an isolated process. `ProcessManager.run(..., bypass_sandbox=False)` retains the existing return shape and lifecycle.
 
-- [ ] Write real-process tests: project write succeeds, outside write fails, outside read succeeds, denied content is unavailable, private temp works, cwd persists, env.sh is sourced, host HTTP service remains reachable, and stop_task removes a background process tree.
-- [ ] Include a path with shell punctuation in cwd metadata tests. Require actual Bubblewrap for integration cases and explicitly skip when unavailable.
-- [ ] Run `uv run --no-sync pytest tests/test_sandbox_processes.py -q`; observe genuine feature failures with Bubblewrap available.
-- [ ] Build a read-only host filesystem view, overlay project/grants and dedicated env/cwd channels, mount private tmp/dev/proc, use a PID namespace and retain host networking. Apply config protection and deny masks last. Missing deny paths fail explicitly.
-- [ ] Replace cwd FD dependence with a narrowly exposed cwd file channel if required by Bubblewrap; preserve safe shell quoting, cancellation and cleanup.
-- [ ] Run focused integration tests and `tests/test_processes.py`; expect all passing.
-- [ ] Commit `feat: run bash commands inside optional sandbox`.
+- [x] Write real-process tests: project write succeeds, outside write fails, outside read succeeds, denied content is unavailable, private temp works, cwd persists, env.sh is sourced, host HTTP service remains reachable, and stop_task removes a background process tree.
+- [x] Include a path with shell punctuation in cwd metadata tests. Require actual Bubblewrap for integration cases and explicitly skip when unavailable.
+- [x] Run `uv run --no-sync pytest tests/test_sandbox_processes.py -q`; observe genuine feature failures with Bubblewrap available.
+- [x] Build a read-only host filesystem view, overlay project/grants and dedicated env/cwd channels, mount private tmp/dev/proc, use a PID namespace and retain host networking. Apply config protection and deny masks last. Missing deny paths fail explicitly.
+- [x] Replace cwd FD dependence with a narrowly exposed cwd file channel if required by Bubblewrap; preserve safe shell quoting, cancellation and cleanup.
+- [x] Run focused integration tests and `tests/test_processes.py`; expect all passing.
+- [x] Commit `feat: run bash commands inside optional sandbox`.
 
 ### Task 3: Approval, CLI and session integration
 
@@ -63,19 +63,19 @@
 
 **Interfaces:** `Harness.open(..., sandbox=False, sandbox_config=None, parent_sandbox=None)` creates/reuses runtime policy. `request_sandbox_access(paths, reason)` requests session-scoped write access. Bash gains `bypass_sandbox=False` and `reason=None`. Reuse `Harness.events()` clearing of pending calls and approvals, and existing missing-result recovery, so interrupted approvals are not replayed.
 
-- [ ] Write failing tests for extra-directory approval, denial, disabled requests/bypass, missing reason, full-access and session-trust separation, one-call bypass, interrupted-call recovery, child sharing, restart revocation and unchanged MCP full-access calls.
-- [ ] Test CLI config precedence and `--sandbox` / `--no-sandbox`, including resume; special approvals offer allow/deny without setting general session trust.
-- [ ] Run `uv run --no-sync pytest tests/test_sandbox_agent.py -q`; observe failures for missing integration.
-- [ ] Wire policy before ProcessManager/context initialization; preserve original project root, share runtime policy with children, add sandbox state to runtime context, and register request tools only when enabled.
-- [ ] Route explicit expansion/bypass through the existing approval callback with normalized scopes and no trust/full-access shortcut. Recover interrupted special calls without replaying them.
-- [ ] Run new tests plus `tests/test_cli_permissions.py`, `tests/test_subagents.py`, `tests/test_mcp.py` and relevant configuration tests; expect all passing.
-- [ ] Commit `feat: expose explicit sandbox authorization in cli`.
+- [x] Write failing tests for extra-directory approval, denial, disabled requests/bypass, missing reason, full-access and session-trust separation, one-call bypass, interrupted-call recovery, child sharing, restart revocation and unchanged MCP full-access calls.
+- [x] Test CLI config precedence and `--sandbox` / `--no-sandbox`, including resume; special approvals offer allow/deny without setting general session trust.
+- [x] Run `uv run --no-sync pytest tests/test_sandbox_agent.py -q`; observe failures for missing integration.
+- [x] Wire policy before ProcessManager/context initialization; preserve original project root, share runtime policy with children, add sandbox state to runtime context, and register request tools only when enabled.
+- [x] Route explicit expansion/bypass through the existing approval callback with normalized scopes and no trust/full-access shortcut. Recover interrupted special calls without replaying them.
+- [x] Run new tests plus `tests/test_cli_permissions.py`, `tests/test_subagents.py`, `tests/test_mcp.py` and relevant configuration tests; expect all passing.
+- [x] Commit `feat: expose explicit sandbox authorization in cli`.
 
 ### Task 4: Usage documentation and final validation
 
-**Files:** Modify `README.md`, `docs/architecture.md`; add a generic sandbox configuration example without personal paths or credentials.
+**Files:** Modify `README.md`, `docs/architecture.md`, `.gitignore`, `.github/workflows/ci.yml`; add `examples/sandbox.example.json` without personal paths or credentials.
 
-- [ ] Document installation, optional CLI flags, deny paths, in-memory grants, exceptions, bypass and MCP scope. Keep README concise and place mechanism details in the architecture guide.
-- [ ] Run `uv run --no-sync pytest -q`, `uv run --no-sync ruff check .`, `uv run --no-sync mini-harness --help`, and `git diff --check`; expect passing tests/checks and documented flags in help.
-- [ ] Independently review the whole branch against spec, plan and real-process results; fix material findings with regression tests.
-- [ ] Commit final documentation and report the worktree/branch and verified behavior. Do not merge without user direction.
+- [x] Document installation, optional CLI flags, deny paths, in-memory grants, exceptions, bypass and MCP scope. Keep README concise and place mechanism details in the architecture guide.
+- [x] Run `uv run --no-sync pytest -q`, `uv run --no-sync ruff check .`, `uv run --no-sync mini-harness --help`, and `git diff --check`; expect passing tests/checks and documented flags in help.
+- [x] Independently review the whole branch against spec, plan and real-process results; fix material findings with regression tests.
+- [x] Commit final documentation and report the worktree/branch and verified behavior. Do not merge without user direction.

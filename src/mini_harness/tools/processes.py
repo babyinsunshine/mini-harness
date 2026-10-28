@@ -34,6 +34,8 @@ class ProcessManager:
     def __init__(self, session: Session, max_runtime_seconds=3600):
         """max_runtime_seconds 限制进程总运行时间，包含转入后台后的时间。"""
         self.session = session
+        if session.sandbox is not None and session.sandbox.session_directory is None:
+            session.sandbox.session_directory = session.directory
         self.env_file = session.directory / "env.sh"
         self.env_file.touch(exist_ok=True)
         # 模型凭据留在父进程；env.sh 仍可显式传入项目所需变量。
