@@ -1,6 +1,7 @@
 """文件访问策略和本次运行的额外授权；不写入会话数据库。"""
 
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -15,6 +16,15 @@ class Sandbox:
     allow_bypass: bool = False
     config_path: Path | None = None
     extra_write_paths: set[Path] = field(default_factory=set)
+
+    @property
+    def blocked_paths(self) -> tuple[Path, ...]:
+        """WSL 的 Windows 执行桥接不继承 Linux 沙箱，必须在沙箱内隐藏入口。"""
+        paths = list(self.deny_paths)
+        if sys.platform == "linux" and "microsoft" in os.uname().release.lower():
+            paths += [path.resolve() for path in (Path("/init"), Path("/run/WSL"))
+                      if path.exists()]
+        return tuple(paths)
 
     @classmethod
     def load(cls, project_root: Path, config_path: Path | None = None):
@@ -44,7 +54,7 @@ class Sandbox:
     def check_path(self, path: Path, *, writing=False, env_file: Path | None = None):
         """禁止路径优先；env.sh 是会话目录内唯一默认可写的工具文件。"""
         path = Path(path).resolve()
-        if any(path.is_relative_to(denied) for denied in self.deny_paths):
+        if any(path.is_relative_to(denied) for denied in self.blocked_paths):
             raise PermissionError(f"Sandbox denies access: {path}")
         if not writing:
             return
@@ -75,7 +85,7 @@ class Sandbox:
         """放入运行上下文，旧对话中的授权文字不代表当前有效权限。"""
         return {
             "write_paths": sorted(map(str, (self.project_root, *self.extra_write_paths))),
-            "deny_paths": list(map(str, self.deny_paths)),
+            "deny_paths": list(map(str, self.blocked_paths)),
             "extra_grants": "Valid only until harness exits; not restored from history.",
         }
 
@@ -127,7 +137,7 @@ class Sandbox:
             command += ["--ro-bind", str(self.config_path), str(self.config_path)]
         # 遮蔽原内容；先处理父目录，已被遮蔽的子路径无需重复挂载。
         masked = []
-        for path in sorted(set(self.deny_paths), key=lambda path: len(path.parts)):
+        for path in sorted(set(self.blocked_paths), key=lambda path: len(path.parts)):
             if any(path.is_relative_to(parent) for parent in masked):
                 continue
             if not path.exists():

@@ -14,6 +14,8 @@ mcp*.json
 *.mcp.json
 !examples/mcp.windows-wsl.json
 !examples/mcp*.example.json
+sandbox*.json
+!examples/sandbox.example.json
 .env.*
 !.env.example
 *.sqlite

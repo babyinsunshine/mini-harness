@@ -194,3 +194,13 @@ async def test_graph_approval_enables_real_sandbox_write_only_after_grant(tmp_pa
     assert results["allowed"].status == "success"
     assert target.read_text() == "approved"
     assert approvals == ["request_sandbox_access"]
+
+
+@pytest.mark.skipif(not Path("/mnt/c/Windows/System32/cmd.exe").is_file(),
+                    reason="Windows interop probe requires WSL with Windows binaries")
+async def test_wsl_windows_execution_bridge_is_blocked_inside_sandbox(processes):
+    result = await processes.run(
+        "/mnt/c/Windows/System32/cmd.exe /d /c echo HARNESS_INTEROP_MUST_BE_BLOCKED",
+    )
+    assert result["exit_code"] != 0
+    assert "HARNESS_INTEROP_MUST_BE_BLOCKED" not in result["preview"]
