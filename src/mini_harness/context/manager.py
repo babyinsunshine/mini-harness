@@ -130,13 +130,20 @@ class ContextManager:
     def with_runtime_context(self, messages):
         """cwd、项目指令或当前计划变化时追加消息，复用未变的请求前缀。"""
         instructions_path = Path(self.session.get("project_root")) / "AGENTS.md"
+        instructions = "(none)"
+        try:
+            if self.session.sandbox is not None:
+                self.session.sandbox.check_path(instructions_path)
+            if instructions_path.is_file():
+                instructions = instructions_path.read_text(encoding="utf-8")
+        except PermissionError:
+            instructions = "(blocked by sandbox)"
         runtime_text = (
             f"[Runtime context]\nCurrent directory: {self.session.cwd}\nProject instructions:\n"
-            + (
-                instructions_path.read_text(encoding="utf-8")
-                if instructions_path.is_file() else "(none)"
-            )
+            + instructions
         )
+        if self.session.sandbox is not None:
+            runtime_text += "\nSandbox:\n" + json.dumps(self.session.sandbox.status())
         # 计划放在已有运行上下文中；摘要后可重建，Reactive 也会保留最新一条。
         if plan := self.session.get("plan"):
             runtime_text += "\nCurrent plan:\n" + json.dumps(plan, ensure_ascii=False)

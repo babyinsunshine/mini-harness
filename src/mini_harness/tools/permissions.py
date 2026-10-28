@@ -89,6 +89,13 @@ def _file_rule(path, session: Session, *, writing: bool) -> tuple[str, str]:
     if not isinstance(path, str) or not path:
         return "ask", "Missing or invalid path"
     target = session.resolve_path(path)
+    if session.sandbox is not None:
+        try:
+            session.sandbox.check_path(
+                target, writing=writing, env_file=session.directory / "env.sh",
+            )
+        except PermissionError as error:
+            return "deny", str(error)
     if writing:
         if any(target.is_relative_to(Path(root).resolve()) for root in SYSTEM_PATHS):
             return "deny", "Writing critical system paths is forbidden"
@@ -99,6 +106,8 @@ def _file_rule(path, session: Session, *, writing: bool) -> tuple[str, str]:
             return "deny", "Overwriting session records is forbidden"
         if target == (session.directory / "env.sh").resolve() or ".git" in target.parts:
             return "ask", "Changing executable environment or Git configuration requires approval"
+    if session.sandbox is not None:
+        return "allow", "File is within sandbox rules"
     roots = (Path(session.get("project_root")), session.directory)
     if any(target.is_relative_to(root) for root in roots):
         return "allow", "File is inside the project or this session"

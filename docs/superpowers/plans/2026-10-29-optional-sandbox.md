@@ -22,7 +22,7 @@
 
 ## Review Focus
 
-- A saved graph approval must not authorize a bypass after process restart: Task 3 tests expired execution authorization.
+- A saved graph approval must not authorize a bypass after process restart: Task 3 tests interrupted-call recovery.
 - Symlink paths must not open a different scope than shown in approval: Task 1 tests canonical path boundaries.
 - A denied skill or AGENTS.md must not leak through automatic context loading: Task 1 tests both paths.
 - Background services and their children must stop when their owning command is stopped: Task 2 uses real Bubblewrap.
@@ -40,7 +40,7 @@
 - [ ] Add tests showing blocked skills are absent from discovery, direct loading fails, and blocked AGENTS.md content does not enter runtime context.
 - [ ] Run `uv run --no-sync pytest tests/test_sandbox.py -q`; observe failure before production code exists.
 - [ ] Implement the policy and call it from file access, skill loading, permission classification and AGENTS.md injection; compaction already reads through file tools.
-- [ ] Run the focused tests plus `tests/test_files.py`, `tests/test_skills.py`, `tests/test_permissions.py`, `tests/test_context.py`; expect all passing.
+- [ ] Run the focused tests plus `tests/test_session_tools.py`, `tests/test_skills.py`, `tests/test_permissions.py`, `tests/test_context.py`; expect all passing.
 - [ ] Commit `feat: add shared sandbox path policy`.
 
 ### Task 2: Restricted Bash processes
@@ -59,15 +59,15 @@
 
 ### Task 3: Approval, CLI and session integration
 
-**Files:** Modify `agent.py`, `subagents.py`, `tools/factory.py`, `tools/permissions.py`, `graph/nodes.py`, `cli/config.py`, `cli/main.py`, `cli/interactive.py`; add `tests/test_sandbox_agent.py` and CLI assertions to existing tests.
+**Files:** Modify `agent.py`, `subagents.py`, `tools/factory.py`, `tools/permissions.py`, `cli/config.py`, `cli/main.py`, `cli/interactive.py`; add `tests/test_sandbox_agent.py` and CLI assertions to existing tests.
 
-**Interfaces:** `Harness.open(..., sandbox=False, sandbox_config=None, parent_sandbox=None)` creates/reuses runtime policy. `request_sandbox_access(paths, reason)` requests session-scoped write access. Bash gains `bypass_sandbox=False` and `reason=None`. Permission checks store one-call execution authorization only in memory; execution consumes it, preventing checkpointed approval reuse.
+**Interfaces:** `Harness.open(..., sandbox=False, sandbox_config=None, parent_sandbox=None)` creates/reuses runtime policy. `request_sandbox_access(paths, reason)` requests session-scoped write access. Bash gains `bypass_sandbox=False` and `reason=None`. Reuse `Harness.events()` clearing of pending calls and approvals, and existing missing-result recovery, so interrupted approvals are not replayed.
 
-- [ ] Write failing tests for extra-directory approval, denial, disabled requests/bypass, missing reason, full-access and session-trust separation, one-call bypass, expired execution authorization, child sharing, restart revocation and unchanged MCP full-access calls.
+- [ ] Write failing tests for extra-directory approval, denial, disabled requests/bypass, missing reason, full-access and session-trust separation, one-call bypass, interrupted-call recovery, child sharing, restart revocation and unchanged MCP full-access calls.
 - [ ] Test CLI config precedence and `--sandbox` / `--no-sandbox`, including resume; special approvals offer allow/deny without setting general session trust.
 - [ ] Run `uv run --no-sync pytest tests/test_sandbox_agent.py -q`; observe failures for missing integration.
 - [ ] Wire policy before ProcessManager/context initialization; preserve original project root, share runtime policy with children, add sandbox state to runtime context, and register request tools only when enabled.
-- [ ] Route explicit expansion/bypass through the existing approval callback with normalized scopes and no trust/full-access shortcut. Check ephemeral execution authorization before executing special calls.
+- [ ] Route explicit expansion/bypass through the existing approval callback with normalized scopes and no trust/full-access shortcut. Recover interrupted special calls without replaying them.
 - [ ] Run new tests plus `tests/test_cli_permissions.py`, `tests/test_subagents.py`, `tests/test_mcp.py` and relevant configuration tests; expect all passing.
 - [ ] Commit `feat: expose explicit sandbox authorization in cli`.
 
