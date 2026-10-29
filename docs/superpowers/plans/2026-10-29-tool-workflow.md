@@ -1,6 +1,6 @@
 # Tool Workflow Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 修复临时文件、后台等待与输出读取体验，保持实现易懂。
 
@@ -32,11 +32,11 @@
 
 **Interfaces:** `Session.scratch_directory: Path`；沿用 `Sandbox.check_path` 和 `Sandbox.command`，当前会话 env_file 决定 scratch 例外。
 
-- [ ] 先写失败测试：文件工具→真实 Bash→文件工具及恢复会话共享 scratch，拒绝管理文件与 scratch 符号链接逃逸，scratch 内保护路径不可通过移动祖先绕过；锁不污染项目且跨项目会话互斥。
-- [ ] 运行相关新测试，确认因 tmpfs/路径规则/旧锁位置失败。
-- [ ] 最小修改，更新旧临时目录隔离测试为共享目录契约；测试将 XDG_STATE_HOME 隔离到 tmp_path。
-- [ ] 运行 `uv run --no-sync pytest tests/test_sandbox.py tests/test_sandbox_processes.py tests/test_file_conflicts.py -q -rs`，预期通过。
-- [ ] 提交 `fix: share session scratch across file tools and bash`。
+- [x] 先写失败测试：文件工具→真实 Bash→文件工具及恢复会话共享 scratch，拒绝管理文件与 scratch 符号链接逃逸，scratch 内保护路径不可通过移动祖先绕过；锁不污染项目且跨项目会话互斥。
+- [x] 运行相关新测试，确认因 tmpfs/路径规则/旧锁位置失败。
+- [x] 最小修改，更新旧临时目录隔离测试为共享目录契约；测试将 XDG_STATE_HOME 隔离到 tmp_path。
+- [x] 运行 `uv run --no-sync pytest tests/test_sandbox.py tests/test_sandbox_processes.py tests/test_file_conflicts.py -q -rs`，预期通过。
+- [x] 提交 `fix: share session scratch across file tools and bash`。
 
 ### Task 2: 等待任务与完整输出分页
 
@@ -44,16 +44,18 @@
 
 **Interfaces:** `ProcessManager.wait_task(task_id, timeout=30, max_output_bytes=2000)`；`run(..., max_output_bytes=2000)`；`read_file(..., max_chars=12000)` 返回完整行分页，保留原有 output/has_more/next_offset 字段。
 
-- [ ] 先写失败测试：查询/等待/超时/取消与恢复任务；真实图无需审批即可等待；调大 Bash 输出上限看到中间内容，非法参数不执行命令；read_file 字符分页不跳行，长行可提高上限，非 UTF-8 提示明确。
-- [ ] 运行新测试，确认缺少接口或当前截断行为导致失败。
-- [ ] 复用 watcher 与日志实现等待/可调预览；实现完整行分页和清晰错误；修正模型可见参数说明、rg 回退和字体按需提示。
-- [ ] 运行 `uv run --no-sync pytest tests/test_processes.py tests/test_session_tools.py tests/test_graph.py tests/test_plan.py -q`，预期通过。
-- [ ] 提交 `fix: add task waiting and bounded complete file pages`。
+- [x] 先写失败测试：查询/等待/超时/取消与恢复任务；真实图无需审批即可等待；调大 Bash 输出上限看到中间内容，非法参数不执行命令；read_file 字符分页不跳行，长行可提高上限，非 UTF-8 提示明确。
+- [x] 运行新测试，确认缺少接口或当前截断行为导致失败。
+- [x] 复用 watcher 与日志实现等待/可调预览；实现完整行分页和清晰错误；修正模型可见参数说明、rg 回退和字体按需提示。
+- [x] 运行 `uv run --no-sync pytest tests/test_processes.py tests/test_session_tools.py tests/test_graph.py tests/test_plan.py -q`，预期通过。
+- [x] 提交 `fix: add task waiting and bounded complete file pages`。
 
 ### Task 3: 文档与完整验证
 
 **Files:** README.md、docs/architecture.md，以及审阅发现对应的最小修复和回归测试。
 
-- [ ] 更新 scratch 生命周期、锁位置/旧进程重启、wait_task、输出参数说明。
-- [ ] 执行 Ruff、完整 pytest、CLI help、git diff --check；预期通过。
-- [ ] 最后独立审阅 2bf0788..HEAD，重要发现先失败回归再修复；记录验证结果，保留草稿 PR，不合并。
+- [x] 更新 scratch 生命周期、锁位置/旧进程重启、wait_task、输出参数说明。
+- [x] 执行 Ruff、完整 pytest、CLI help、git diff --check；预期通过。
+- [x] 最后独立审阅 2bf0788..HEAD，重要发现先失败回归再修复；记录验证结果，保留草稿 PR，不合并。
+
+最终验证：本地完整测试 346 passed（含真实 Bubblewrap）；Ruff、CLI help、diff check 通过。独立审阅的两处发现均用失败回归复现并修复，之后重跑全套通过。

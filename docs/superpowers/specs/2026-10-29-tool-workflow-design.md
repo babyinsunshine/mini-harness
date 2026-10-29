@@ -4,7 +4,7 @@
 
 - 临时目录使用真实的 `session/tmp`：文件工具和 Bash 均可写，跨调用和恢复会话保留；删除会话时一同删除。数据库等管理文件仍只读，deny_paths 和配置/运行文件保护优先；拒绝将 scratch 根替换为符号链接。
 - 每个会话使用自己的 scratch；主、子智能体继续共享沙箱策略，各自有明确的 scratch 绝对路径。默认 TMPDIR 指向这里，env.sh 的显式配置仍按现有机制生效。
-- 文件锁移到用户状态目录：`${XDG_STATE_HOME:-~/.local/state}/mini-harness/file-locks/`，继续按规范化的目标绝对路径哈希，跨会话/进程共享，不在项目创建锁元数据。不迁移或删除可能仍被旧进程使用的旧锁文件；更新代码后应重启旧 harness。
+- 文件锁移到用户状态目录：`${XDG_STATE_HOME:-~/.local/state}/mini-harness/file-locks/`，继续按规范化的目标绝对路径哈希；空或相对的 XDG_STATE_HOME 回退默认目录，跨会话/进程共享，不在项目创建锁元数据。不迁移或删除可能仍被旧进程使用的旧锁文件；更新代码后应重启旧 harness。
 - 增加一个 `wait_task(task_id, timeout=30, max_output_bytes=2000)`：timeout=0 查询，0..120 秒等待；超时或取消等待不终止后台任务；返回状态、退出码、预览和日志路径。恢复会话的旧任务返回已记录的 interrupted 状态。
 - Bash 和 wait_task 支持 1..100000 字节的输出预览上限，默认 2000；完整日志继续落盘，完成通知保持短预览。
 - read_file 增加 max_chars，默认 12000、上限 100000，按完整行和字符预算分页，明确 start_line/end_line/next_offset；不再把选区二次裁成预览。单行超限明确提示增大上限或用 Bash 切片；二进制/非 UTF-8 提示使用相应工具。
