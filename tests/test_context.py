@@ -121,6 +121,20 @@ def tool_history(counts=(1,) * 8, size=1800):
     return messages
 
 
+def test_reactive_keeps_last_tool_group_after_final_reply_with_large_fixed_overhead(tmp_path):
+    messages = tool_history(counts=(1,) * 4, size=5000)
+    messages.extend([
+        AIMessage(content="Finished inspecting", id="final-reply"),
+        HumanMessage(content="Now fix it", id="user-latest"),
+    ])
+    with Session(tmp_path / "s", tmp_path) as session:
+        result = reactive_compact(messages, session, ContextPolicy(), overhead=10000)
+    results = {m.tool_call_id for m in result if isinstance(m, ToolMessage)}
+    assert "call-3-0" in results
+    assert "call-0-0" not in results
+    assert any(m.id == "final-reply" for m in result)
+
+
 def test_micro_default_budget_keeps_recent_output_during_one_long_user_turn(tmp_path):
     with Session(tmp_path / "s", tmp_path) as session:
         messages = tool_history(size=30000)

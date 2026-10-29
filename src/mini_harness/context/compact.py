@@ -248,7 +248,13 @@ def reactive_compact(
         (i for i in range(len(groups) - 1, -1, -1) if isinstance(groups[i][0], AIMessage)),
         len(groups) - 1,
     )
-    # 最新 assistant/工具组及其后的用户输入、内部通知一起保留。
+    # 最后一句普通回复之前的最近工具组也要保留，不能依赖减半预算恰好留下它。
+    tail = next(
+        (i for i in range(tail, -1, -1)
+         if isinstance(groups[i][0], AIMessage) and groups[i][0].tool_calls),
+        tail,
+    )
+    # 最新工具组（没有工具时为最新 assistant）及后续用户输入、内部通知一起保留。
     protected = {m.id for m in flatten_groups(groups[tail:])}
     protected.update(
         m.id for m in messages
