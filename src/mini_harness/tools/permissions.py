@@ -77,8 +77,8 @@ class Permissions:
 def classify(tool_call: dict, session: Session) -> tuple[str, str]:
     """返回 allow / ask / deny 和原因；只检查请求，不执行或修改任何内容。"""
     name, args = tool_call["name"], tool_call.get("args", {})
-    if name in {"read_file", "write_file", "edit_file"}:
-        return _file_rule(args.get("path"), session, writing=name != "read_file")
+    if name in {"read_file", "read_image", "write_file", "edit_file"}:
+        return _file_rule(args.get("path"), session, writing=name in {"write_file", "edit_file"})
     if name == "update_plan":
         return "allow", "Update this session's task plan"
     if name in {"spawn_agent", "wait_agent", "continue_agent", "close_agent"}:
