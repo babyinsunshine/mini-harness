@@ -239,6 +239,14 @@ def is_context_overflow(error: Exception) -> bool:
     )
 
 
+def is_user_message(message: AnyMessage) -> bool:
+    """区分真实用户输入与内部通知；兼容尚未使用 user- ID 的旧会话。"""
+    return isinstance(message, HumanMessage) and (
+        (message.id or "").startswith("user-")
+        or not str(message.content).startswith(INTERNAL_CONTEXT_PREFIXES)
+    )
+
+
 def reactive_compact(
     messages: list[AnyMessage], session: Session, policy: ContextPolicy, overhead: int = 0
 ) -> list[AnyMessage]:
@@ -248,12 +256,14 @@ def reactive_compact(
         (i for i in range(len(groups) - 1, -1, -1) if isinstance(groups[i][0], AIMessage)),
         len(groups) - 1,
     )
-    # 最后一句普通回复之前的最近工具组也要保留，不能依赖减半预算恰好留下它。
-    tail = next(
-        (i for i in range(tail, -1, -1)
-         if isinstance(groups[i][0], AIMessage) and groups[i][0].tool_calls),
-        tail,
-    )
+    # 普通回复之前的最近工具组也保留，但不跨越该回复所属的用户轮次。
+    for index in range(tail, -1, -1):
+        message = groups[index][0]
+        if is_user_message(message):
+            break
+        if isinstance(message, AIMessage) and message.tool_calls:
+            tail = index
+            break
     # 最新工具组（没有工具时为最新 assistant）及后续用户输入、内部通知一起保留。
     protected = {m.id for m in flatten_groups(groups[tail:])}
     protected.update(
@@ -263,11 +273,7 @@ def reactive_compact(
         and str(m.content).startswith("[Conversation continuation summary]")
     )
     for message in reversed(messages):
-        if isinstance(message, HumanMessage) and (
-            (message.id or "").startswith("user-")
-            # 兼容尚未使用 user- ID 的既有会话。
-            or not str(message.content).startswith(INTERNAL_CONTEXT_PREFIXES)
-        ):
+        if is_user_message(message):
             protected.add(message.id)
             break
     for message in reversed(messages):
