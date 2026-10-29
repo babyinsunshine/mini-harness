@@ -38,6 +38,88 @@ async def test_long_log_preview_keeps_start_and_final_error(tmp_path):
             assert result["output_bytes"] > 4000
 
 
+async def test_wait_task_queries_times_out_then_returns_completion(tmp_path):
+    with Session(tmp_path / "s", tmp_path) as session:
+        async with ProcessManager(session) as processes:
+            started = await processes.run("cat", run_in_background=True)
+            task_id = started["task_id"]
+            assert (await processes.wait_task(task_id, timeout=0))["status"] == "running"
+            assert (await processes.wait_task(task_id, timeout=0.01))["status"] == "running"
+            assert processes.tasks[task_id].process.returncode is None
+            await processes.send_input(task_id, "finished\n", eof=True)
+            result = await processes.wait_task(task_id, timeout=2)
+            assert result["status"] == "exited" and result["exit_code"] == 0
+            assert result["preview"] == "finished\n"
+            assert len(processes.drain_events()) == 1
+
+
+async def test_cancel_wait_does_not_cancel_process_watcher(tmp_path):
+    with Session(tmp_path / "s", tmp_path) as session:
+        async with ProcessManager(session) as processes:
+            result = await processes.run("cat", run_in_background=True)
+            task_id = result["task_id"]
+            waiting = asyncio.create_task(processes.wait_task(task_id, timeout=30))
+            await asyncio.sleep(0)
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            assert not processes.tasks[task_id].watch_task.done()
+            await processes.send_input(task_id, "still alive", eof=True)
+            assert (await processes.wait_task(task_id, timeout=2))["preview"] == "still alive"
+
+
+async def test_output_limit_can_reveal_middle_and_wait_uses_the_same_limit(tmp_path):
+    with Session(tmp_path / "s", tmp_path) as session:
+        async with ProcessManager(session) as processes:
+            command = "python3 -c \"print('BEGIN' + 'x' * 2000 + 'MIDDLE' + 'y' * 2000 + 'END')\""
+            small = await processes.run(command)
+            assert "MIDDLE" not in small["preview"] and small["truncated"]
+            large = await processes.wait_task(small["task_id"], timeout=0, max_output_bytes=10000)
+            assert "MIDDLE" in large["preview"] and not large["truncated"]
+            assert large["preview"] == Path(large["output_path"]).read_text()
+            assert not (await processes.run(command, max_output_bytes=10000))["truncated"]
+
+
+async def test_preview_remains_bounded_if_log_grows_during_read(tmp_path, monkeypatch):
+    import os
+
+    with Session(tmp_path / "s", tmp_path) as session:
+        async with ProcessManager(session) as processes:
+            result = await processes.run("python3 -c \"print('x' * 4000)\"")
+            output = Path(result["output_path"])
+            original_fstat = os.fstat
+
+            def append_after_stat(fd):
+                snapshot = original_fstat(fd)
+                with output.open("ab") as stream:
+                    stream.write(b"y" * 20000)
+                return snapshot
+
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "fstat", append_after_stat)
+                shown = processes.describe_task(processes.tasks[result["task_id"]])
+            assert len(shown["preview"].encode()) < 2100
+
+
+@pytest.mark.parametrize("limit", [0, 100001])
+async def test_invalid_output_limit_does_not_execute_command(tmp_path, limit):
+    with Session(tmp_path / "s", tmp_path) as session:
+        async with ProcessManager(session) as processes:
+            with pytest.raises(ValueError, match="output|bytes"):
+                await processes.run("touch must-not-exist", max_output_bytes=limit)
+            assert not (tmp_path / "must-not-exist").exists()
+
+
+@pytest.mark.parametrize("timeout", [-1, 121])
+async def test_invalid_wait_timeout_keeps_task_running(tmp_path, timeout):
+    with Session(tmp_path / "s", tmp_path) as session:
+        async with ProcessManager(session) as processes:
+            result = await processes.run("cat", run_in_background=True)
+            with pytest.raises(ValueError, match="timeout"):
+                await processes.wait_task(result["task_id"], timeout=timeout)
+            assert processes.tasks[result["task_id"]].process.returncode is None
+
+
 async def wait_done(manager, task_id):
     for _ in range(100):
         task = manager.tasks[task_id]
@@ -183,6 +265,10 @@ async def test_reopened_session_reports_interrupted_background_task(tmp_path):
             assert event["status"] == "interrupted"
             assert event["task_id"] == result["task_id"]
             assert manager.tasks == {}
+            restored = await manager.wait_task(result["task_id"], timeout=0)
+            assert restored["status"] == "interrupted"
+            with pytest.raises(ValueError, match="Unknown task"):
+                await manager.wait_task("unknown", timeout=0)
 
 
 async def test_cleanup_handles_children_after_shell_leader_exits(tmp_path):

@@ -8,7 +8,7 @@ from ..session import Session
 
 
 class PlanStep(BaseModel):
-    """工具参数结构，同时告诉模型每个步骤需要哪些字段。"""
+    """A task description and its execution status."""
 
     step: str
     status: Literal["pending", "in_progress", "completed"]

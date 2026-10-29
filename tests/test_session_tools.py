@@ -35,17 +35,48 @@ def test_large_output_artifact_and_preview_survive_reopen(tmp_path):
         assert session.prepare_tool_output(text, max_chars=50) == shown
 
 
-async def test_read_tool_spills_large_output_before_returning_it(tmp_path):
-    from pathlib import Path
-
+async def test_read_tool_reports_long_line_and_accepts_a_larger_budget(tmp_path):
     text = "start " + "x" * 20000 + " END\n"
     (tmp_path / "large.txt").write_text(text)
     with Session(tmp_path / "session", tmp_path) as session:
         read = next(tool for tool in create_tools(session, None) if tool.name == "read_file")
-        result = await read.ainvoke({"path": "large.txt"})
-        assert result["truncated"] is True
-        assert len(result["preview"]) <= 2000
-        assert Path(result["output_path"]).read_text() == "1: " + text
+        with pytest.raises(ValueError, match="max_chars"):
+            await read.ainvoke({"path": "large.txt"})
+        result = await read.ainvoke({"path": "large.txt", "max_chars": 30000})
+        assert result["output"] == "1: " + text
+        assert result["start_line"] == result["end_line"] == 1
+        assert result["has_more"] is False
+
+
+async def test_character_budget_pages_complete_lines_without_skipping(tmp_path):
+    (tmp_path / "source.py").write_text("first\nsecond\nthird\n")
+    with Session(tmp_path / "s", tmp_path) as session:
+        tool = next(t for t in create_tools(session, None) if t.name == "read_file")
+        offset = 1
+        outputs = []
+        for index in range(1, 4):
+            page = await tool.ainvoke({"path": "source.py", "offset": offset, "max_chars": 10})
+            assert page["start_line"] == page["end_line"] == index
+            assert page["has_more"] == (index < 3)
+            outputs.append(page["output"])
+            offset = page["next_offset"]
+        assert outputs == ["1: first\n", "2: second\n", "3: third\n"]
+        assert offset is None
+
+
+def test_non_utf8_file_has_an_actionable_image_hint(tmp_path):
+    (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff")
+    with Session(tmp_path / "s", tmp_path) as session:
+        with pytest.raises(ValueError, match="read_image"):
+            read_file(session, "image.png")
+
+
+@pytest.mark.parametrize("max_chars", [0, 100001])
+def test_read_rejects_unbounded_character_budgets(tmp_path, max_chars):
+    (tmp_path / "a.txt").write_text("text")
+    with Session(tmp_path / "s", tmp_path) as session:
+        with pytest.raises(ValueError, match="max_chars"):
+            read_file(session, "a.txt", max_chars=max_chars)
 
 
 def test_session_rejects_second_writer(tmp_path):

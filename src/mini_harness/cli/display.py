@@ -64,16 +64,19 @@ def format_event(event) -> str:
     preview = str(output_details.get("output", output_details.get("preview", tool_output)))
     # Bash 的最后几行通常最有价值；文件内容从选区开头展示。
     lines = preview.splitlines()
-    selected = lines[-6:] if event["name"] == "bash" else lines[:6]
-    excerpt = "\n".join(line[-200:] if event["name"] == "bash" else line[:200] for line in selected)
+    process_output = event["name"] in {"bash", "wait_task", "send_input", "stop_task"}
+    selected = lines[-6:] if process_output else lines[:6]
+    excerpt = "\n".join(line[-200:] if process_output else line[:200] for line in selected)
     status = event["status"]
     if output_details.get("exit_code") not in (None, 0):
         status = f"exit {output_details['exit_code']}"
     parts = [f"[{status}] {event['name']} ({event['elapsed']:.2f}s)"]
+    if output_details.get("start_line") is not None:
+        parts.append(f"Lines {output_details['start_line']}-{output_details['end_line']}")
     if excerpt:
         parts.append(excerpt)
-    if len(lines) > 6:
-        parts.append("[… preview shortened …]")
+    if len(lines) > 6 or any(len(line) > 200 for line in selected):
+        parts.append("[… terminal preview shortened …]")
     if output_details.get("output_path"):
         parts.append(f"Full output: {output_details['output_path']}")
     if output_details.get("has_more"):

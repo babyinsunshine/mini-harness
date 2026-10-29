@@ -22,6 +22,22 @@ async def test_default_budget_completes_forty_tool_rounds(tmp_path):
         assert len(model.seen) == 41
 
 
+async def test_model_can_wait_for_own_background_task_without_approval(tmp_path):
+    model = ScriptedModel()
+    async with Harness.open(tmp_path, tmp_path / "s", model) as harness:
+        started = await harness.processes.run("cat", run_in_background=True)
+        task_id = started["task_id"]
+        await harness.processes.send_input(task_id, "task result", eof=True)
+        model.responses.extend([
+            call("wait_task", {"task_id": task_id, "timeout": 2}, "wait"),
+            AIMessage(content="Checked task result"),
+        ])
+        assert await consume(harness, "Wait for the task") == "Checked task result"
+        result = next(m for m in model.seen[-1] if isinstance(m, ToolMessage))
+        assert result.status == "success" and "task result" in result.text
+        assert harness.session.get_execution("wait")[0] == "done"
+
+
 async def test_model_usage_calibrates_input_and_is_visible_in_events(tmp_path):
     usage = {"input_tokens": 9000, "output_tokens": 3, "total_tokens": 9003}
     reply = AIMessage(
