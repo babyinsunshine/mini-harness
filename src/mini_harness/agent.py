@@ -58,6 +58,7 @@ class Harness:
             + (
                 f"\nSession ID: {session.id}\nProject root: {session.get('project_root')}\n"
                 f"Environment file: {processes.env_file}\n"
+                f"Scratch directory: {session.scratch_directory}\n"
             )
         )
         if session.sandbox is not None:

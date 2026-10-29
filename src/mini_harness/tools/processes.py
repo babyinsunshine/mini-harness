@@ -42,6 +42,7 @@ class ProcessManager:
         self.environment = {
             key: value for key, value in os.environ.items() if key not in MODEL_CREDENTIALS
         }
+        self.environment["TMPDIR"] = str(session.scratch_directory)
         self.max_runtime_seconds = max_runtime_seconds
         self.tasks: dict[str, ProcessTask] = {}
         self.completion_events = asyncio.Queue()

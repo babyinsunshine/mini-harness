@@ -74,7 +74,7 @@ async def test_bash_cwd_channel_handles_shell_characters_and_sources_env(process
 
 
 @pytest.mark.parametrize("grant_session_directory", [False, True])
-async def test_bash_private_temp_does_not_write_host_temp_files(processes, grant_session_directory):
+async def test_bash_temp_files_are_shared_with_file_tools(processes, grant_session_directory):
     if grant_session_directory:
         processes.session.sandbox.grant([str(processes.session.directory)])
     code = "import tempfile; f=tempfile.NamedTemporaryFile(" \
@@ -85,10 +85,64 @@ async def test_bash_private_temp_does_not_write_host_temp_files(processes, grant
     path = Path(result["preview"].strip())
     try:
         assert path.is_relative_to(processes.session.directory)
-        assert not path.exists()
+        assert path.read_bytes() == b"temporary"
+        assert (await processes.run(f"cat {shlex.quote(str(path))}"))["preview"] == "temporary"
     finally:
         if path.exists() and path.name.startswith("mini-harness-sandbox-test-"):
             path.unlink()
+
+
+async def test_file_tool_script_and_bash_results_share_scratch(processes):
+    from mini_harness.tools.files import read_file, write_file
+
+    scratch = processes.session.directory / "tmp"
+    script = scratch / "probe.py"
+    write_file(processes.session, str(script), "print('scratch works')\n")
+    result = await processes.run('python3 "$TMPDIR/probe.py" > "$TMPDIR/result.txt"')
+    assert result["exit_code"] == 0, result
+    assert read_file(processes.session, str(scratch / "result.txt"))["output"] == (
+        "1: scratch works\n"
+    )
+    assert (await processes.run('cat "$TMPDIR/result.txt"'))["preview"] == "scratch works\n"
+    assert not list(processes.session.cwd.iterdir())
+
+
+async def test_scratch_symlink_cannot_write_session_database(processes):
+    from mini_harness.tools.files import write_file
+
+    scratch = processes.session.directory / "tmp"
+    scratch.mkdir(exist_ok=True)
+    (scratch / "database").symlink_to(processes.session.runtime_database)
+    with pytest.raises(PermissionError, match="read-only"):
+        write_file(processes.session, str(scratch / "database"), "blocked")
+    result = await processes.run('printf blocked > "$TMPDIR/database"')
+    assert result["exit_code"] != 0
+    assert processes.session.get("project_root") == str(processes.session.cwd)
+
+
+async def test_scratch_root_cannot_be_replaced_with_a_symlink(processes):
+    scratch = processes.session.directory / "tmp"
+    scratch.mkdir(exist_ok=True)
+    scratch.rmdir()
+    scratch.symlink_to(processes.session.cwd, target_is_directory=True)
+    with pytest.raises(PermissionError, match="[Ss]cratch|[Tt]emporary"):
+        await processes.run(":")
+
+
+@pytest.mark.parametrize("protection", ["config", "deny"])
+async def test_scratch_protected_ancestor_cannot_be_moved(processes, protection):
+    private = processes.session.directory / "tmp" / "private"
+    private.mkdir(parents=True)
+    protected = private / "policy.json"
+    protected.write_text('{"private": true}')
+    if protection == "config":
+        processes.session.sandbox.config_path = protected
+    else:
+        processes.session.sandbox.deny_paths = (protected,)
+    assert (await processes.run('test -d "$TMPDIR/private"'))["exit_code"] == 0
+    result = await processes.run('mv "$TMPDIR/private" "$TMPDIR/moved"')
+    assert result["exit_code"] != 0
+    assert protected.read_text() == '{"private": true}'
 
 
 async def test_bash_uses_host_network(processes):

@@ -12,6 +12,26 @@ from mini_harness.session import Session
 from mini_harness.tools.files import edit_file, read_file, write_file
 
 
+def test_same_target_uses_shared_user_lock_across_project_roots(tmp_path, monkeypatch):
+    from mini_harness.tools.file_guard import access_file
+
+    first, second = tmp_path / "first-project", tmp_path / "second-project"
+    first.mkdir()
+    second.mkdir()
+    target = tmp_path / "shared.txt"
+    target.write_text("shared")
+    state = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    with Session(tmp_path / "a", first) as a, Session(tmp_path / "b", second) as b:
+        with access_file(a, target):
+            with pytest.raises(ValueError, match="locked"):
+                read_file(b, str(target))
+        assert read_file(b, str(target))["output"] == "1: shared"
+    assert not (first / ".mini-harness").exists()
+    assert not (second / ".mini-harness").exists()
+    assert len(list((state / "mini-harness" / "file-locks").iterdir())) == 1
+
+
 @pytest.mark.parametrize("operation", ["write", "edit"])
 def test_stale_changes_are_rejected_until_the_agent_reads_again(tmp_path, operation):
     target = tmp_path / "shared.py"

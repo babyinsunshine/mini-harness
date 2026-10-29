@@ -44,6 +44,8 @@ class Session:
             raise ValueError("A new session requires a working directory")
         self.artifacts = self.directory / "artifacts"
         self.artifacts.mkdir(exist_ok=True)
+        self.scratch_directory = self.directory / "tmp"
+        self.scratch_directory.mkdir(exist_ok=True)
         self.transcript = self.directory / "transcript.jsonl"
         self._recorded_event_ids = set()
         if self.transcript.exists():
