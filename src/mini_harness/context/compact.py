@@ -24,10 +24,14 @@ INTERNAL_CONTEXT_PREFIXES = (
 
 
 def conversation_text(messages: list[AnyMessage]) -> str:
-    """序列化角色、正文和工具调用关系，供摘要与 token 估算共用。"""
+    """序列化文字与工具关系；图片保留路径说明，不把 Base64 送入文字摘要。"""
     items = []
     for message in messages:
-        item = {"role": message.type, "content": message.content}
+        content = message.content
+        if isinstance(content, list):
+            content = [block for block in content
+                       if not (isinstance(block, dict) and block.get("type") == "image")]
+        item = {"role": message.type, "content": content}
         if isinstance(message, AIMessage) and message.tool_calls:
             item["tool_calls"] = message.tool_calls
         if isinstance(message, AIMessage) and message.invalid_tool_calls:
@@ -39,8 +43,13 @@ def conversation_text(messages: list[AnyMessage]) -> str:
 
 
 def estimate_tokens(messages: list[AnyMessage]) -> int:
-    """按 UTF-8 大小粗估，包含工具参数；主请求再用 API usage 校准。"""
-    return (len(conversation_text(messages).encode()) + 2) // 3
+    """文字按 UTF-8 粗估，图片暂按每张 4096；主请求再用 API usage 校准。"""
+    images = sum(
+        isinstance(block, dict) and block.get("type") == "image"
+        for message in messages if isinstance(message.content, list)
+        for block in message.content
+    )
+    return (len(conversation_text(messages).encode()) + 2) // 3 + images * 4096
 
 
 def group_messages(messages: list[AnyMessage]) -> list[list[AnyMessage]]:
@@ -93,15 +102,23 @@ def micro_compact(
             output_tokens += size
             if protected:
                 continue
-            text = (
-                message.content
-                if isinstance(message.content, str)
-                else json.dumps(message.content, ensure_ascii=False)
-            )
-            path = session.artifact_path(text)
-            replacement = message.model_copy(
-                update={"content": f"[Old tool result content cleared; full output: {path}]"}
-            )
+            if isinstance(message.content, list) and any(
+                isinstance(block, dict) and block.get("type") == "image"
+                for block in message.content
+            ):
+                # 原图已由读取工具保存；保留文字路径，不再把编码写成另一份文本文件。
+                text = None
+                content = (
+                    "[Old tool result content cleared; image removed. "
+                    "Use read_image with the saved path to view again.]\n" + message.text
+                )
+            else:
+                text = (message.content if isinstance(message.content, str)
+                        else json.dumps(message.content, ensure_ascii=False))
+                content = (
+                    f"[Old tool result content cleared; full output: {session.artifact_path(text)}]"
+                )
+            replacement = message.model_copy(update={"content": content})
             saved = size - estimate_tokens([replacement])
             if saved > 0:
                 candidates[message.id] = (replacement, text)
@@ -110,7 +127,8 @@ def micro_compact(
         return messages
     # 只有真正裁剪时才写磁盘；后续请求和恢复会话复用相同的引用文本。
     for _, text in candidates.values():
-        session.save_artifact(text)
+        if text is not None:
+            session.save_artifact(text)
     return [candidates[m.id][0] if m.id in candidates else m for m in messages]
 
 

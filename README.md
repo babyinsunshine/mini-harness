@@ -19,7 +19,7 @@ uv run mini-harness
 
 ## 功能
 
-- **基础工具**：Bash、文件读写与精确编辑；后台任务、stdin 和进程清理。
+- **基础工具**：Bash、文件读写与精确编辑、PNG/JPEG 图片读取；后台任务与进程清理。
 - **上下文**：工具结果裁剪、自动/手动摘要、超限恢复，完整长输出保存到磁盘。
 - **会话**：SQLite 检查点、中断恢复、任务清单和缓存统计。
 - **子智能体**：独立会话并行工作，支持继续、关闭和超时清理。
@@ -41,6 +41,7 @@ uv run mini-harness --help
 交互命令：`/help`、`/compact`、`/tasks`、`/stats`、`/sessions`、`/exit`。
 默认执行普通权限审批；`--full-access` 跳过普通审批，仍保留已开启的沙箱边界和扩权审批。
 沙箱需要安装 `bubblewrap`，配置与使用见[文件沙箱](docs/architecture.md#文件沙箱)。
+看图需要支持图片输入的模型；让智能体用 `read_image` 查看图片路径即可，单图最多 5 MiB。
 
 ## Skills 与 MCP
 
