@@ -15,14 +15,19 @@ from mini_harness.session import Session
 from mini_harness.tools.permissions import classify
 
 PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC"
+)
+JPEG = base64.b64decode(
+    "/9j/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBA"
+    "QEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAAP/EABQQAQAAAAAA"
+    "AAAAAAAAAAAAAAD/2gAIAQEAAD8AP//Z"
 )
 
 
 @pytest.mark.parametrize("data,mime,suffix", [
     (PNG, "image/png", ".png"),
-    (b"\xff\xd8\xff\xe0JPEG signature fixture", "image/jpeg", ".jpg"),
-])
+    (JPEG, "image/jpeg", ".jpg"),
+], ids=["png", "jpeg"])
 def test_read_image_identifies_content_and_saves_original_bytes(tmp_path, data, mime, suffix):
     from mini_harness.tools.images import read_image
 
