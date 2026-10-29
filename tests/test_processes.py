@@ -80,6 +80,28 @@ async def test_output_limit_can_reveal_middle_and_wait_uses_the_same_limit(tmp_p
             assert not (await processes.run(command, max_output_bytes=10000))["truncated"]
 
 
+@pytest.mark.parametrize("log_exists", [True, False])
+async def test_restored_task_applies_each_requested_output_limit(tmp_path, log_exists):
+    directory = tmp_path / "s"
+    with Session(directory, tmp_path) as session:
+        async with ProcessManager(session) as processes:
+            saved = await processes.run("python3 -c \"print('x' * 3000)\"", max_output_bytes=4000)
+    if not log_exists:
+        Path(saved["output_path"]).unlink()
+    with Session(directory) as session:
+        async with ProcessManager(session) as processes:
+            small = await processes.wait_task(saved["task_id"], timeout=0, max_output_bytes=1)
+            assert small["status"] == "exited" and small["exit_code"] == 0
+            assert len(small["preview"].encode()) < 100 and small["truncated"]
+            if log_exists:
+                large = await processes.wait_task(
+                    saved["task_id"], timeout=0, max_output_bytes=4000,
+                )
+                assert large["preview"] == "x" * 3000 + "\n" and not large["truncated"]
+            else:
+                assert small["output_missing"] is True
+
+
 async def test_preview_remains_bounded_if_log_grows_during_read(tmp_path, monkeypatch):
     import os
 

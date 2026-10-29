@@ -33,7 +33,9 @@ def access_file(
         session.sandbox.check_path(
             target, writing=writing, env_file=session.directory / "env.sh",
         )
-    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    configured_state = Path(os.environ.get("XDG_STATE_HOME", ""))
+    state_home = (configured_state if configured_state.is_absolute()
+                  else Path.home() / ".local" / "state")
     lock_directory = state_home / "mini-harness" / "file-locks"
     lock_directory.mkdir(parents=True, exist_ok=True)
     lock_name = hashlib.sha256(str(target).encode()).hexdigest()

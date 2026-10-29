@@ -171,6 +171,7 @@ read_file 默认最多 200 行、12000 字符（包含行号）；max_chars 可�
 
 文件工具使用短时非阻塞锁：主智能体、子智能体和独立会话按目标绝对路径共享
 `${XDG_STATE_HOME:-~/.local/state}/mini-harness/file-locks/`，不在项目创建锁元数据。
+XDG_STATE_HOME 为空或不是绝对路径时使用默认用户状态目录，避免锁位置随启动目录变化。
 冲突直接返回文件名和占用者 Session ID，异常也会释放锁。
 升级后应关闭旧版本 harness 再重启；旧的项目锁文件不会自动迁移或删除，以免影响尚在运行的进程。
 读取时记录完整文件的 SHA-256，保存在各会话 `runtime.sqlite` 的 `metadata.file_versions`。
@@ -197,6 +198,7 @@ read_file 默认最多 200 行、12000 字符（包含行号）；max_chars 可�
 - 后台完成通知在安全的模型调用点注入；空闲的交互 CLI 可以继续处理完成事件。
 - wait_task 默认等待最多 30 秒，timeout=0 立即查询，允许范围 0..120 秒。
   超时或取消只结束等待，后台任务与 watcher 继续运行；恢复后的旧任务返回已记录状态，不使用旧 PID。
+  恢复任务也按本次输出上限读取原日志；日志已删除时返回有界缓存并标明 output_missing。
 - `--process-timeout` 控制命令最长运行时间，默认一小时。停止和正常退出会清理进程组。
   shell 结束后也会清理遗留子进程；长服务使用 `run_in_background=True`。
 - 恢复后将原来的活动进程记录标为 interrupted，不会使用旧 PID。

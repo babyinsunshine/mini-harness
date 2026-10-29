@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
@@ -30,6 +31,46 @@ def test_same_target_uses_shared_user_lock_across_project_roots(tmp_path, monkey
     assert not (first / ".mini-harness").exists()
     assert not (second / ".mini-harness").exists()
     assert len(list((state / "mini-harness" / "file-locks").iterdir())) == 1
+
+
+@pytest.mark.parametrize("state_value", ["", "relative-state"])
+def test_invalid_state_home_uses_shared_default_across_process_cwds(
+    tmp_path, monkeypatch, state_value,
+):
+    from mini_harness.tools.file_guard import access_file
+
+    first, second, home = tmp_path / "first", tmp_path / "second", tmp_path / "home"
+    first.mkdir()
+    second.mkdir()
+    target = tmp_path / "shared.txt"
+    target.write_text("shared")
+    monkeypatch.setenv("XDG_STATE_HOME", state_value)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.chdir(first)
+    # 只固定用户目录；真实子进程从另一个 cwd 启动，保留真实 flock 与文件访问。
+    program = '''
+import sys
+from pathlib import Path
+Path.home = classmethod(lambda cls: Path(sys.argv[1]))
+from mini_harness.session import Session
+from mini_harness.tools.files import read_file
+with Session(Path(sys.argv[2]), Path.cwd()) as session:
+    try:
+        print(read_file(session, sys.argv[3])["output"])
+    except ValueError as error:
+        print(error)
+'''
+    with Session(tmp_path / "owner", first) as owner:
+        with access_file(owner, target):
+            result = subprocess.run(
+                [sys.executable, "-c", program, str(home), str(tmp_path / "child"), str(target)],
+                cwd=second, capture_output=True, text=True, timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            assert "locked" in result.stdout
+    assert len(list((home / ".local/state/mini-harness/file-locks").iterdir())) == 1
+    assert not (first / "mini-harness").exists()
+    assert not (second / "mini-harness").exists()
 
 
 @pytest.mark.parametrize("operation", ["write", "edit"])

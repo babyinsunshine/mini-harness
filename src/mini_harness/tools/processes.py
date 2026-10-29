@@ -21,6 +21,25 @@ def _check_output_limit(max_output_bytes: int):
         raise ValueError("max_output_bytes must be between 1 and 100000")
 
 
+def _read_output(output_path: Path, max_output_bytes: int) -> dict:
+    """按本次预算读取日志头尾，活动任务和恢复后的记录共用。"""
+    _check_output_limit(max_output_bytes)
+    with output_path.open("rb") as stream:
+        output_bytes = os.fstat(stream.fileno()).st_size
+        head_bytes = max_output_bytes // 4
+        preview = stream.read(output_bytes if output_bytes <= max_output_bytes else head_bytes)
+        if output_bytes > max_output_bytes:
+            tail_bytes = max_output_bytes - head_bytes
+            stream.seek(output_bytes - tail_bytes)
+            preview += b"\n[... middle omitted; see output_path ...]\n"
+            preview += stream.read(tail_bytes)
+    return {
+        "preview": preview.decode("utf-8", errors="replace"),
+        "truncated": output_bytes > max_output_bytes,
+        "output_bytes": output_bytes,
+    }
+
+
 @dataclass
 class ProcessTask:
     id: str
@@ -150,25 +169,12 @@ class ProcessManager:
 
     def describe_task(self, task: ProcessTask, max_output_bytes: int = 2000) -> dict:
         """从进程句柄和日志生成当前任务状态，不等待任务完成。"""
-        _check_output_limit(max_output_bytes)
-        with task.output_path.open("rb") as stream:
-            output_bytes = os.fstat(stream.fileno()).st_size
-            head_bytes = max_output_bytes // 4
-            preview = stream.read(output_bytes if output_bytes <= max_output_bytes else head_bytes)
-            if output_bytes > max_output_bytes:
-                # 保留开头的命令信息，以及尾部常见的报错和测试结论。
-                tail_bytes = max_output_bytes - head_bytes
-                stream.seek(output_bytes - tail_bytes)
-                preview += b"\n[... middle omitted; see output_path ...]\n"
-                preview += stream.read(tail_bytes)
         return {
             "task_id": task.id,
             "status": "running" if task.process.returncode is None else "exited",
             "exit_code": task.process.returncode,
             "output_path": str(task.output_path),
-            "preview": preview.decode("utf-8", errors="replace"),
-            "truncated": output_bytes > max_output_bytes,
-            "output_bytes": output_bytes,
+            **_read_output(task.output_path, max_output_bytes),
             "reason": task.reason,
         }
 
@@ -182,7 +188,16 @@ class ProcessManager:
             saved = self.session.get("processes", {}).get(task_id)
             if saved is None:
                 raise ValueError(f"Unknown task: {task_id}")
-            return saved
+            try:
+                return {**saved, **_read_output(Path(saved["output_path"]), max_output_bytes)}
+            except FileNotFoundError:
+                # 日志被清理后仍可查询状态，但缓存预览也必须服从本次上限。
+                preview = saved.get("preview", "").encode()
+                return {
+                    **saved, "preview": preview[:max_output_bytes].decode("utf-8", errors="ignore"),
+                    "truncated": saved.get("truncated", False) or len(preview) > max_output_bytes,
+                    "output_missing": True,
+                }
         if timeout:
             try:
                 await asyncio.wait_for(asyncio.shield(task.watch_task), timeout)
