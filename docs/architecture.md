@@ -147,8 +147,9 @@ uv run mini-harness --sandbox --sandbox-config ~/.config/mini-harness/sandbox.js
 启动时固定 Bubblewrap 的实际程序路径，并保护它不被工具修改或被项目中新建的同名程序接管。
 `--no-sandbox` 可显式关闭，包括恢复一个原先启用沙箱的会话。配置和 Bubblewrap 不可用时会明确报错。
 
-可写例外逐项保留：当前会话的 `env.sh`、通过 `TMPDIR` 提供的独立临时空间、日志与 cwd 回传通道。
-临时文件随该次命令退出消失，后续命令需要的文件应放在项目内；宿主 `/tmp` 保持只读可见。
+可写例外逐项保留：当前会话的 `env.sh`、真实的 `tmp/` 目录、日志与 cwd 回传通道。
+文件工具和 Bash 共享 `tmp/`，默认 TMPDIR 指向这里；文件跨调用及会话恢复保留，删除会话时一起删除。
+可先用 write_file 写测试脚本，再用后续 Bash 执行，无需把中间产物放进项目。宿主 `/tmp` 仍只读。
 SQLite、transcript 和其他管理产物由外部 harness 写入，不开放整个会话目录给命令修改。
 会话数据即使放在项目内也保持只读，仅为当前会话的专用通道单独开放。
 禁止路径优先于这些工具访问例外。包管理器缓存可指向项目内，或申请其缓存目录的写权限。
@@ -160,19 +161,24 @@ WSL 内默认隐藏 `/init` 和 `/run/WSL` 执行桥接入口，阻止命令直�
 
 ## 工具与执行
 
-基础工具：`bash`、`read_file`、`write_file`、`edit_file`。搜索通过 Bash 中的 `rg`。
+基础工具：`bash`、`read_file`、`write_file`、`edit_file`、`read_image`。
+搜索优先通过 Bash 的 `rg`，不可用时使用 `grep`/`find`。
 `read_file` 使用从 1 开始的行号；`edit_file` 只接受唯一、非空的精确匹配。
-读取结果包含 `has_more` 和 `next_offset`，有后续内容时用该 offset 继续读取。
+read_file 默认最多 200 行、12000 字符（包含行号）；max_chars 可调至 100000。
+按完整行分页，不二次裁成预览；start_line/end_line 是实际交付范围，有后续内容时用 next_offset 继续。
+单行超出预算时明确提示提高 max_chars 或通过 Bash 分段查看；非 UTF-8 提示使用图片工具或检查编码。
 编辑结果包含局部 unified diff；长结果继续保存到 artifacts 并返回短预览。
 
-文件工具使用短时非阻塞锁：同项目的主智能体、子智能体和独立会话共享
-`.mini-harness/file-locks/`，冲突直接返回文件名和占用者 Session ID，异常也会释放锁。
+文件工具使用短时非阻塞锁：主智能体、子智能体和独立会话按目标绝对路径共享
+`${XDG_STATE_HOME:-~/.local/state}/mini-harness/file-locks/`，不在项目创建锁元数据。
+冲突直接返回文件名和占用者 Session ID，异常也会释放锁。
+升级后应关闭旧版本 harness 再重启；旧的项目锁文件不会自动迁移或删除，以免影响尚在运行的进程。
 读取时记录完整文件的 SHA-256，保存在各会话 `runtime.sqlite` 的 `metadata.file_versions`。
 压缩后的自动附件读取不确认新版本，修改前仍按显式读取的记录检查。
 已有文件须先读取再修改，新文件可以直接创建；版本变化时拒绝覆盖，重新读取后再编辑。
 这套保护覆盖内置文件工具；Bash、MCP 和外部编辑器不自动遵守锁。
 
-进程控制只补充 `send_input(task_id, text, eof)` 和 `stop_task(task_id)`：
+进程控制提供 `wait_task(task_id, timeout, max_output_bytes)`、`send_input` 和 `stop_task`：
 
 - 每次 Bash 都启动新进程，继承启动环境时过滤 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、
   `DEEPSEEK_API_KEY`、`AZURE_OPENAI_API_KEY` 和 `AZURE_OPENAI_AD_TOKEN`；父进程的模型配置不受影响。
@@ -185,9 +191,12 @@ WSL 内默认隐藏 `/init` 和 `/run/WSL` 执行桥接入口，阻止命令直�
 - `timeout` 是前台等待时间，默认 120 秒；未完成时保留原进程并转后台。
   `run_in_background=True` 则直接后台运行。
 - stdout/stderr 持续写入文件，结果返回日志路径、头尾预览、任务 ID 和退出码。
-  超长预览保留开头约 500 字节、末尾约 1500 字节，并标明 `truncated` 和 `output_bytes`。
+  max_output_bytes 默认 2000，可调范围 1..100000；超长时保留约四分之一开头和四分之三尾部，
+  并标明 `truncated` 和 `output_bytes`，完整输出始终在日志文件。
   stdin 使用普通管道，可追加输入和发送 EOF；没有 PTY。
 - 后台完成通知在安全的模型调用点注入；空闲的交互 CLI 可以继续处理完成事件。
+- wait_task 默认等待最多 30 秒，timeout=0 立即查询，允许范围 0..120 秒。
+  超时或取消只结束等待，后台任务与 watcher 继续运行；恢复后的旧任务返回已记录状态，不使用旧 PID。
 - `--process-timeout` 控制命令最长运行时间，默认一小时。停止和正常退出会清理进程组。
   shell 结束后也会清理遗留子进程；长服务使用 `run_in_background=True`。
 - 恢复后将原来的活动进程记录标为 interrupted，不会使用旧 PID。
@@ -358,7 +367,7 @@ description: 为本项目编写或调整 Python 测试时使用。
 设计基线是讨论中选定的[压缩机制文章](https://deepseek.csdn.net/6a2233c610ee7a33f277cf93.html)。
 机制如下：
 
-1. 大型文件工具输出落盘，返回路径与预览；Bash 输出直接写日志文件。
+1. read_file 返回有界完整行分页；其他大型文字结果落盘返回预览，Bash 输出直接写日志文件。
 2. Micro：倒序扫描工具结果，保护近期完整工具往返与输出预算；旧结果攒够可节省量后，
    才批量替换为稳定的文件引用。请求间隔达到 5 分钟时降低裁剪门槛，保护范围不变。
 3. Auto：超过自动阈值时，生成九项结构化摘要，并保留近期完整轮次。
@@ -392,7 +401,7 @@ Micro 参考 [OpenCode v1.2.0 的预算式裁剪](https://github.com/anomalyco/o
 | `--micro-idle-seconds` | 300 | 切换到强化裁剪的主模型请求间隔 |
 
 这些参数随会话保存；恢复时可用同名 CLI 参数覆盖。
-单次大输出仍在工具返回前处理：文件输出超长时落盘并返回预览，Bash 直接写日志，
+单次大输出仍在工具返回前处理：read_file 按完整行分页，其他长文字结果落盘预览，Bash 直接写日志，
 `ContextManager` 负责历史清理，避免巨型结果先进入模型上下文。
 
 摘要压缩后会按预算重新读取最近通过文件工具查看的文件范围；项目指令每次请求重新加载。
@@ -438,7 +447,7 @@ Micro 是可移植的本地实现，不依赖 Anthropic 内部 cache_edits；裁
 ├── runtime.sqlite      # 运行元数据和工具执行记录
 ├── transcript.jsonl    # 原始消息和执行/压缩事件，追加写入
 ├── env.sh              # 唯一的会话环境脚本，自动创建，智能体可修改
-├── tmp/                # 沙箱临时挂载点，命令内的内容不保存到宿主
+├── tmp/                # 文件工具与 Bash 共享的中间文件，跨调用及会话恢复保留
 └── artifacts/          # 完整工具输出、进程日志、cwd 回传文件
 ```
 
