@@ -32,14 +32,14 @@
 **Files:**
 - Modify: src/mini_harness/agent.py、graph/nodes.py、tools/processes.py、cli/interactive.py
 - Modify: docs/architecture.md
-- Test: tests/test_agent_cli.py、test_cli_permissions.py、test_processes.py、test_mcp.py
+- Test: tests/test_interruption.py（复用现有模型和 CLI fixture）、tests/test_mcp.py
 
 **Interfaces:**
 - Consumes: Harness.restore_tool_messages(messages)、ProcessManager._terminate(task)、CLI run_turn。
 - Produces: Harness 取消出口保存完整历史；前台 Bash 的取消异常携带最终任务记录；CLI 暂停完成通知触发模型，聊天输入恢复。
 
-- [ ] **Step 1:** 先写回归测试：批次中断立即保存配对结果且不重放；Bash 保留输出路径；后台通知暂停与聊天恢复；重复 Ctrl-C；模型流和文件写入边界；MCP 中断不丢配对、不重试。
-- [ ] **Step 2:** 运行新增测试，确认预期缺陷为 RED；已有 MCP/文件行为已经满足要求时记录为现有行为验证。
-- [ ] **Step 3:** 仅修改上述取消出口、进程结果和 CLI 暂停逻辑，保持普通执行与审批流程。
-- [ ] **Step 4:** 运行 `uv run --no-sync pytest -q` 和 `uv run --no-sync ruff check src tests`，预期全部通过；`git diff --check` 无输出。
+- [x] **Step 1:** 先写回归测试：批次中断立即保存配对结果且不重放；Bash 保留输出路径；后台通知暂停与聊天恢复；重复 Ctrl-C；模型流和文件写入边界；MCP 中断不丢配对、不重试。
+- [x] **Step 2:** 运行新增测试，确认预期缺陷为 RED；已有 MCP/文件行为已经满足要求时记录为现有行为验证。
+- [x] **Step 3:** 仅修改上述取消出口、进程结果和 CLI 暂停逻辑，保持普通执行与审批流程。
+- [x] **Step 4:** 运行 `uv run --no-sync pytest -q` 和 `uv run --no-sync ruff check src tests`，预期全部通过；`git diff --check` 无输出。
 - [ ] **Step 5:** 更新架构说明并提交，执行一次独立审阅；重要发现以 RED→GREEN 修复，最后保留工作树和分支。

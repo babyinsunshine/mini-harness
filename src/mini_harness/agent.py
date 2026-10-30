@@ -214,6 +214,17 @@ class Harness:
         except asyncio.CancelledError:
             if self.subagents is not None:
                 await self.subagents.interrupt()
+            # 工具已完成清理；把结果与未执行的调用一起保存，再交还终端。
+            snapshot = await self.graph.aget_state(self.config)
+            messages = self.restore_tool_messages(snapshot.values.get("messages", []))
+            for message in messages:
+                self.session.record_message(message)
+            await self.graph.aupdate_state(
+                self.config,
+                {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages],
+                 "pending_calls": [], "approved": False, "next": "end"},
+                as_node="response",
+            )
             raise
         yield {"type": "done"}
 

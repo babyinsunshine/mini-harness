@@ -54,6 +54,14 @@ class ProcessTask:
     reason: str | None = None
 
 
+class BashInterrupted(asyncio.CancelledError):
+    """取消仍向上传播，同时把清理后的状态交给工具执行记录。"""
+
+    def __init__(self, result):
+        super().__init__("Bash interrupted")
+        self.result = result
+
+
 class ProcessManager:
     def __init__(self, session: Session, max_runtime_seconds=3600):
         """max_runtime_seconds 限制进程总运行时间，包含转入后台后的时间。"""
@@ -127,9 +135,9 @@ class ProcessManager:
                     if task.watch_task.done():
                         self._notify_completion(task)
                 except asyncio.CancelledError:
+                    task.reason = "interrupted"
                     await self._terminate(task)
                     await task.watch_task
-                    raise
                 else:
                     if cwd_file.exists():
                         new_cwd = cwd_file.read_text().rstrip("\n")
@@ -138,6 +146,8 @@ class ProcessManager:
             result = self.describe_task(task, max_output_bytes)
             self._save_task_state(result)
             self.session.record("process", **result, command=command)
+            if task.reason == "interrupted":
+                raise BashInterrupted(result)
             return result
 
     async def _watch_process(self, task: ProcessTask):

@@ -71,6 +71,8 @@ async def slow() -> str:
     """Wait until canceled."""
     import asyncio
     (root / "slow.started").touch()
+    with (root / "slow.effects").open("a") as stream:
+        stream.write("x")
     await asyncio.sleep(60)
     return "finished"
 
@@ -301,7 +303,7 @@ async def test_explicit_config_resolves_cwd_relative_to_its_directory(mcp_projec
 async def test_canceling_mcp_call_records_interruption_and_cleans_server(mcp_project):
     model = ScriptedModel(responses=[call("call_mcp_tool", {
         "server": "local", "tool_name": "slow", "arguments": {},
-    }, "slow")])
+    }, "slow"), AIMessage(content="Inspect remote state before retrying")])
     async with asyncio.timeout(10):
         async with Harness.open(mcp_project, mcp_project / "session", model,
                                 mcp_config=mcp_project / ".mcp.json",
@@ -318,6 +320,13 @@ async def test_canceling_mcp_call_records_interruption_and_cleans_server(mcp_pro
                 await asyncio.gather(running, return_exceptions=True)
             saved = harness.session.get_execution("slow")
             assert saved[0] == "error" and "interrupted" in saved[1]["data"]["content"].lower()
+            snapshot = await harness.graph.aget_state(harness.config)
+            result = next(m for m in snapshot.values["messages"] if isinstance(m, ToolMessage))
+            assert result.tool_call_id == "slow" and "not confirmed" in result.content
+            assert snapshot.next == ()
+            assert (mcp_project / "slow.effects").read_text() == "x"
+            await consume(harness, "Inspect the operation, do not repeat it")
+            assert (mcp_project / "slow.effects").read_text() == "x"
             pid = int((mcp_project / "server.pid").read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
