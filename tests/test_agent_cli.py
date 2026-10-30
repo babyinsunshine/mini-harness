@@ -404,6 +404,76 @@ async def test_pending_call_repaired_without_replaying_side_effects(tmp_path):
     assert any(isinstance(m, ToolMessage) for m in model.seen[0])
 
 
+async def test_recovery_keeps_tool_results_from_pending_checkpoint_writes(tmp_path):
+    directory = tmp_path / "session"
+    result = ToolMessage(content="Already completed", tool_call_id="finished", id="result-finished")
+    async with Harness.open(tmp_path, directory, ScriptedModel()) as harness:
+        await harness.graph.aupdate_state(
+            harness.config,
+            {
+                "messages": [
+                    HumanMessage(content="Run once", id="user-original"),
+                    call("bash", {"command": "touch replayed"}, "finished"),
+                ],
+                "pending_calls": [{"name": "bash", "args": {}, "id": "finished"}],
+                "approved": True,
+            },
+            as_node="permission",
+        )
+        snapshot = await harness.graph.aget_state(harness.config)
+        harness.session.start_execution("finished")
+        harness.session.finish_execution("finished", message_to_dict(result))
+        # 模拟工具已完成、结果只写入 pending writes，还未生成下一份检查点时中断。
+        await harness.graph.checkpointer.aput_writes(
+            snapshot.config,
+            [("messages", [result]), ("pending_calls", []), ("approved", False)],
+            snapshot.tasks[0].id,
+        )
+    model = ScriptedModel(responses=[AIMessage(content="Continued")])
+    async with Harness.open(tmp_path, directory, model) as harness:
+        await consume(harness, "Continue without repeating the command")
+        messages = model.seen[0]
+        index = next(i for i, message in enumerate(messages) if getattr(message, "tool_calls", []))
+        assert messages[index + 1] == result
+        assert messages[index + 2].content == "Continue without repeating the command"
+        saved = (await harness.graph.aget_state(harness.config)).values["messages"]
+        assert result in saved
+    assert not (tmp_path / "replayed").exists()
+
+
+async def test_recovery_places_existing_and_missing_results_before_later_user_messages(tmp_path):
+    model = ScriptedModel(responses=[AIMessage(content="Recovered")])
+    result = ToolMessage(content="Original output", tool_call_id="done", id="result-done")
+    later_user = HumanMessage(content="Check the results", id="user-later")
+    async with Harness.open(tmp_path, tmp_path / "session", model) as harness:
+        await harness.graph.aupdate_state(
+            harness.config,
+            {"messages": [
+                HumanMessage(content="Run both commands", id="user-original"),
+                AIMessage(content="", tool_calls=[
+                    {"name": "bash", "args": {"command": "touch replayed"}, "id": "done"},
+                    {"name": "bash", "args": {"command": "touch never-run"}, "id": "missing"},
+                ]),
+                later_user,
+                result,
+            ]},
+        )
+        await consume(harness, "Continue")
+        for messages in (
+            model.seen[0],
+            (await harness.graph.aget_state(harness.config)).values["messages"],
+        ):
+            index = next(i for i, message in enumerate(messages)
+                         if getattr(message, "tool_calls", []))
+            assert messages[index + 1] == result
+            canceled = messages[index + 2]
+            assert isinstance(canceled, ToolMessage) and canceled.tool_call_id == "missing"
+            assert canceled.status == "error" and "not run" in canceled.content
+            assert messages[index + 3] == later_user
+    assert not (tmp_path / "replayed").exists()
+    assert not (tmp_path / "never-run").exists()
+
+
 async def test_reactive_recovery_survives_actual_graph_checkpoint(tmp_path):
     (tmp_path / "data.txt").write_text("Original output " + "x" * 5000)
     model = ScriptedModel(
@@ -565,7 +635,7 @@ def test_resume_restores_model_window_with_explicit_overrides(tmp_path):
     assert not args.full_access  # 恢复会话时不自动开启完全访问。
     assert args.micro_keep_tokens == 32000
     assert args.micro_idle_seconds == 300
-    assert args.max_steps == 1000
+    assert args.max_steps == 100000
     with Session(directory) as session:
         session.set("config", {"max_steps": 200})
     args = build_parser().parse_args(["--resume", "s"])

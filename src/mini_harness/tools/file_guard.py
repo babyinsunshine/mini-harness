@@ -2,6 +2,7 @@
 
 import fcntl
 import hashlib
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -32,7 +33,10 @@ def access_file(
         session.sandbox.check_path(
             target, writing=writing, env_file=session.directory / "env.sh",
         )
-    lock_directory = Path(session.get("project_root")) / ".mini-harness" / "file-locks"
+    configured_state = Path(os.environ.get("XDG_STATE_HOME", ""))
+    state_home = (configured_state if configured_state.is_absolute()
+                  else Path.home() / ".local" / "state")
+    lock_directory = state_home / "mini-harness" / "file-locks"
     lock_directory.mkdir(parents=True, exist_ok=True)
     lock_name = hashlib.sha256(str(target).encode()).hexdigest()
     # 保留旁路锁文件，目标文件创建/删除不会改变锁；锁是否有效由 flock 决定。

@@ -58,6 +58,7 @@ class Harness:
             + (
                 f"\nSession ID: {session.id}\nProject root: {session.get('project_root')}\n"
                 f"Environment file: {processes.env_file}\n"
+                f"Scratch directory: {session.scratch_directory}\n"
             )
         )
         if session.sandbox is not None:
@@ -84,7 +85,7 @@ class Harness:
     @asynccontextmanager
     async def open(
         cls, cwd, session_dir, model, policy=None,
-        max_steps=1000, process_timeout=3600, approve=None,
+        max_steps=100000, process_timeout=3600, approve=None,
         parent_session=None, parent_permissions=None, full_access=False,
         mcp_config=None, parent_mcp=None,
         sandbox=False, sandbox_config=None, parent_sandbox=None,
@@ -138,17 +139,22 @@ class Harness:
                     async with checkpointer.lock:
                         pass
 
-    def recover_missing_tool_results(self, messages):
-        """补齐中断时缺失的工具结果，复用执行记录，不重新执行工具。"""
-        completed_call_ids = {
-            message.tool_call_id for message in messages if isinstance(message, ToolMessage)
+    def restore_tool_messages(self, messages):
+        """把结果放回对应调用之后；缺失时复用执行记录，不重新执行工具。"""
+        results = {
+            message.tool_call_id: message
+            for message in messages if isinstance(message, ToolMessage)
         }
-        recovered_results = []
+        restored = []
         for message in messages:
+            if isinstance(message, ToolMessage):
+                continue  # 结果随对应的 assistant 消息一起放回，避免夹入用户消息。
+            restored.append(message)
             if not isinstance(message, AIMessage):
                 continue
             for tool_call in [*message.tool_calls, *message.invalid_tool_calls]:
-                if tool_call["id"] in completed_call_ids:
+                if tool_call["id"] in results:
+                    restored.append(results[tool_call["id"]])
                     continue
                 execution_record = self.session.get_execution(tool_call["id"])
                 if execution_record and execution_record[1] is not None:
@@ -162,8 +168,8 @@ class Harness:
                         id=f"result-{tool_call['id']}",
                         status="error",
                     )
-                recovered_results.append(result)
-        return recovered_results
+                restored.append(result)
+        return restored
 
     async def events(self, user_input: str | None, *, input_id: str | None = None):
         """接收本次用户输入并产生事件；user_input=None 时仅处理已有会话。
@@ -173,7 +179,7 @@ class Harness:
         if self.subagents is not None:
             self.subagents.resume_interrupted()
         snapshot = await self.graph.aget_state(self.config)
-        messages = self.recover_missing_tool_results(snapshot.values.get("messages", []))
+        messages = self.restore_tool_messages(snapshot.values.get("messages", []))
         last_input_id = snapshot.values.get("last_user_input_id", "")
         # 消息可能已被摘要替换，是否接收过输入要看检查点字段，不能只查消息 ID。
         if user_input is not None and (input_id is None or input_id != last_input_id):
@@ -182,7 +188,8 @@ class Harness:
         try:
             async for stream_mode, stream_data in self.graph.astream(
                 {
-                    "messages": messages,
+                    # snapshot 包含尚未合入检查点的工具结果；只提交新增消息会丢掉它们。
+                    "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages],
                     "pending_calls": [],
                     "approved": False,
                     "repair_attempts": 0,
@@ -222,7 +229,7 @@ class Harness:
         messages = snapshot.values.get("messages", [])
         if not messages:
             raise ValueError("There are no messages to compact")
-        if self.recover_missing_tool_results(messages):
+        if self.restore_tool_messages(messages) != messages:
             raise ValueError("Finish or recover interrupted tool calls before compacting")
         result = await self.context.compact(messages, instructions, start_group, end_group)
         await self.graph.aupdate_state(

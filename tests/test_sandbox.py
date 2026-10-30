@@ -11,6 +11,23 @@ from mini_harness.tools.permissions import classify
 from mini_harness.tools.skills import list_skills, load_skill
 
 
+def test_scratch_is_writable_and_survives_session_restore(tmp_path):
+    from mini_harness.sandbox import Sandbox
+
+    directory = tmp_path / "session"
+    with Session(directory, tmp_path) as session:
+        session.sandbox = Sandbox.load(tmp_path)
+        session.sandbox.session_directory = directory
+        write_file(session, str(directory / "tmp" / "script.py"), "print('kept')")
+        with pytest.raises(PermissionError):
+            write_file(session, str(directory / "runtime.sqlite"), "blocked")
+    with Session(directory) as session:
+        assert session.scratch_directory == directory / "tmp"
+        assert read_file(session, str(session.scratch_directory / "script.py"))["output"] == (
+            "1: print('kept')"
+        )
+
+
 @pytest.fixture
 def session(tmp_path):
     project = tmp_path / "project"

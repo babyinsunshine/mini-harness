@@ -54,7 +54,7 @@ class Sandbox:
         )
 
     def check_path(self, path: Path, *, writing=False, env_file: Path | None = None):
-        """禁止路径优先；env.sh 是会话目录内唯一默认可写的工具文件。"""
+        """禁止路径优先；当前会话的 env.sh 和真实 scratch 是明确可写例外。"""
         path = Path(path).resolve()
         if any(path.is_relative_to(denied) for denied in self.blocked_paths):
             raise PermissionError(f"Sandbox denies access: {path}")
@@ -62,7 +62,9 @@ class Sandbox:
             return
         if path in (self.config_path, self.runtime_path):
             raise PermissionError(f"Sandbox configuration/runtime is read-only: {path}")
-        if env_file is not None and path == env_file.resolve():
+        if env_file is not None and (
+            path == env_file.resolve() or path.is_relative_to(env_file.parent / "tmp")
+        ):
             return
         state_directory = self.session_directory or (env_file.parent if env_file else None)
         if state_directory is not None and path.is_relative_to(state_directory):
@@ -141,6 +143,8 @@ class Sandbox:
         """主机只读、指定路径可写；共享网络，隔离 PID 并随父进程退出。"""
         temporary = env_file.parent / "tmp"
         temporary.mkdir(exist_ok=True)
+        if temporary.resolve() != temporary:
+            raise PermissionError("Scratch directory must not be a symbolic link")
         command = [
             self.require_runtime(), "--unshare-all", "--share-net", "--unshare-user",
             "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
@@ -157,9 +161,12 @@ class Sandbox:
         ]
         protected = [*self.blocked_paths, state_directory, *protected_files]
         # 只遮蔽目标还不够：固定可写祖先，阻止移走父目录后在下次调用读取旧内容。
-        ancestors = set()
+        ancestors, scratch_ancestors = set(), set()
         for path in protected:
             for parent in path.parents:
+                if parent != temporary and parent.is_relative_to(temporary):
+                    scratch_ancestors.add(parent)
+                    continue
                 if parent in writable or parent.is_relative_to(state_directory):
                     continue
                 if any(parent.is_relative_to(root) for root in writable):
@@ -167,11 +174,12 @@ class Sandbox:
         for path in sorted(ancestors, key=lambda path: len(path.parts)):
             command += ["--bind", str(path), str(path)]
         command += ["--ro-bind", str(state_directory), str(state_directory)]
-        for path in (env_file, cwd_file):
+        for path in (env_file, cwd_file, temporary):
+            command += ["--bind", str(path), str(path)]
+        for path in sorted(scratch_ancestors, key=lambda path: len(path.parts)):
             command += ["--bind", str(path), str(path)]
         # 专用挂载放在可写父目录之后，避免父目录覆盖它们。
-        command += ["--proc", "/proc", "--dev", "/dev",
-                    "--tmpfs", str(temporary), "--setenv", "TMPDIR", str(temporary)]
+        command += ["--proc", "/proc", "--dev", "/dev", "--setenv", "TMPDIR", str(temporary)]
         for path in protected_files:
             command += ["--ro-bind", str(path), str(path)]
         # 遮蔽原内容；先处理父目录，已被遮蔽的子路径无需重复挂载。

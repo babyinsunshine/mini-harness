@@ -16,6 +16,30 @@ MODEL_CREDENTIALS = {
 }
 
 
+def _check_output_limit(max_output_bytes: int):
+    if not 1 <= max_output_bytes <= 100000:
+        raise ValueError("max_output_bytes must be between 1 and 100000")
+
+
+def _read_output(output_path: Path, max_output_bytes: int) -> dict:
+    """按本次预算读取日志头尾，活动任务和恢复后的记录共用。"""
+    _check_output_limit(max_output_bytes)
+    with output_path.open("rb") as stream:
+        output_bytes = os.fstat(stream.fileno()).st_size
+        head_bytes = max_output_bytes // 4
+        preview = stream.read(output_bytes if output_bytes <= max_output_bytes else head_bytes)
+        if output_bytes > max_output_bytes:
+            tail_bytes = max_output_bytes - head_bytes
+            stream.seek(output_bytes - tail_bytes)
+            preview += b"\n[... middle omitted; see output_path ...]\n"
+            preview += stream.read(tail_bytes)
+    return {
+        "preview": preview.decode("utf-8", errors="replace"),
+        "truncated": output_bytes > max_output_bytes,
+        "output_bytes": output_bytes,
+    }
+
+
 @dataclass
 class ProcessTask:
     id: str
@@ -42,6 +66,7 @@ class ProcessManager:
         self.environment = {
             key: value for key, value in os.environ.items() if key not in MODEL_CREDENTIALS
         }
+        self.environment["TMPDIR"] = str(session.scratch_directory)
         self.max_runtime_seconds = max_runtime_seconds
         self.tasks: dict[str, ProcessTask] = {}
         self.completion_events = asyncio.Queue()
@@ -55,11 +80,12 @@ class ProcessManager:
 
     async def run(
         self, command: str, timeout: float = 120, run_in_background: bool = False,
-        *, bypass_sandbox: bool = False,
+        *, bypass_sandbox: bool = False, max_output_bytes: int = 2000,
     ):
         """timeout 是前台等待秒数；超时或 run_in_background=True 时保留后台进程。"""
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        _check_output_limit(max_output_bytes)
         async with self._run_lock:
             task_id = str(uuid4())
             output_path = self.session.artifacts / f"process-{task_id}.log"
@@ -109,7 +135,7 @@ class ProcessManager:
                         new_cwd = cwd_file.read_text().rstrip("\n")
                         if new_cwd and Path(new_cwd).is_dir():
                             self.session.cwd = Path(new_cwd)
-            result = self.describe_task(task)
+            result = self.describe_task(task, max_output_bytes)
             self._save_task_state(result)
             self.session.record("process", **result, command=command)
             return result
@@ -141,25 +167,43 @@ class ProcessManager:
         records[result["task_id"]] = result
         self.session.set("processes", records)
 
-    def describe_task(self, task: ProcessTask) -> dict:
+    def describe_task(self, task: ProcessTask, max_output_bytes: int = 2000) -> dict:
         """从进程句柄和日志生成当前任务状态，不等待任务完成。"""
-        with task.output_path.open("rb") as stream:
-            output_bytes = os.fstat(stream.fileno()).st_size
-            preview = stream.read(output_bytes if output_bytes <= 2000 else 500)
-            if output_bytes > 2000:
-                # 保留开头的命令信息，以及尾部常见的报错和测试结论。
-                stream.seek(output_bytes - 1500)
-                preview += b"\n[... middle omitted; see output_path ...]\n" + stream.read(1500)
         return {
             "task_id": task.id,
             "status": "running" if task.process.returncode is None else "exited",
             "exit_code": task.process.returncode,
             "output_path": str(task.output_path),
-            "preview": preview.decode("utf-8", errors="replace"),
-            "truncated": output_bytes > 2000,
-            "output_bytes": output_bytes,
+            **_read_output(task.output_path, max_output_bytes),
             "reason": task.reason,
         }
+
+    async def wait_task(self, task_id: str, timeout: float = 30, max_output_bytes: int = 2000):
+        """查询或等待任务；超时和取消只停止等待，不取消进程 watcher。"""
+        if not 0 <= timeout <= 120:
+            raise ValueError("timeout must be between 0 and 120 seconds")
+        _check_output_limit(max_output_bytes)
+        task = self.tasks.get(task_id)
+        if task is None:
+            saved = self.session.get("processes", {}).get(task_id)
+            if saved is None:
+                raise ValueError(f"Unknown task: {task_id}")
+            try:
+                return {**saved, **_read_output(Path(saved["output_path"]), max_output_bytes)}
+            except FileNotFoundError:
+                # 日志被清理后仍可查询状态，但缓存预览也必须服从本次上限。
+                preview = saved.get("preview", "").encode()
+                return {
+                    **saved, "preview": preview[:max_output_bytes].decode("utf-8", errors="ignore"),
+                    "truncated": saved.get("truncated", False) or len(preview) > max_output_bytes,
+                    "output_missing": True,
+                }
+        if timeout:
+            try:
+                await asyncio.wait_for(asyncio.shield(task.watch_task), timeout)
+            except TimeoutError:
+                pass
+        return self.describe_task(task, max_output_bytes)
 
     async def send_input(self, task_id: str, text: str = "", eof: bool = False):
         """向 task_id 对应进程的 stdin 写入 text；eof=True 时随后关闭输入。"""

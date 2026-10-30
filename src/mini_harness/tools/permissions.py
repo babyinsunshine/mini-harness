@@ -95,8 +95,8 @@ def classify(tool_call: dict, session: Session) -> tuple[str, str]:
         return _file_rule(str(path), session, writing=False)
     if name == "bash":
         return _bash_rule(args.get("command"), session)
-    if name == "stop_task":
-        return "allow", "Stop a task owned by this session"
+    if name in {"wait_task", "stop_task"}:
+        return "allow", "Manage a process owned by this session"
     return "ask", "This tool requires approval"
 
 
