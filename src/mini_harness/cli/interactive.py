@@ -15,9 +15,19 @@ from .display import display_events
 from .usage import format_session_usage
 
 
+def command_name(user_input):
+    """只识别已有终端命令；以 / 开头的文件路径等仍然是聊天。"""
+    if user_input in {"/tasks", "/stats", "/sessions", "/help"}:
+        return user_input
+    if user_input == "/compact" or user_input.startswith("/compact "):
+        return "/compact"
+    return None
+
+
 async def handle_input(harness, user_input, sessions_dir):
     """处理斜杠命令或聊天输入；sessions_dir 是所有会话的存放目录。"""
-    if user_input == "/tasks":
+    command = command_name(user_input)
+    if command == "/tasks":
         for task in harness.processes.tasks.values():
             print(json.dumps(harness.processes.describe_task(task), ensure_ascii=False))
         if harness.subagents is not None:
@@ -25,13 +35,13 @@ async def handle_input(harness, user_input, sessions_dir):
                 print(json.dumps({key: agent[key] for key in (
                     "agent_id", "status", "session_dir"
                 )}, ensure_ascii=False))
-    elif user_input == "/stats":
+    elif command == "/stats":
         print(format_session_usage(harness.session))
-    elif user_input == "/sessions":
+    elif command == "/sessions":
         print("\n".join(list_sessions(sessions_dir)))
-    elif user_input == "/help":
+    elif command == "/help":
         print("/compact [--from N --to M] [focus]  /tasks  /stats  /sessions  /exit")
-    elif user_input == "/compact" or user_input.startswith("/compact "):
+    elif command == "/compact":
         options = argparse.ArgumentParser(add_help=False, exit_on_error=False)
         options.add_argument("--from", dest="start_group", type=int)
         options.add_argument("--to", dest="end_group", type=int)
@@ -54,6 +64,7 @@ async def run_interactive(harness, sessions_dir):
     active_approval = None
     pending_inputs = []
     exiting = False
+    paused = False
 
     def read_stdin():
         # 持续读取并记录到达时间，模型思考期间的输入仍然是聊天，不是未来的审批。
@@ -76,12 +87,15 @@ async def run_interactive(harness, sessions_dir):
         return item
 
     def interrupt():
+        nonlocal paused
+        paused = True
         if agent_task is not None and not agent_task.done():
-            agent_task.cancel()
+            if not agent_task.cancelling():  # 再按 Ctrl-C 也要等当前清理完成。
+                agent_task.cancel()
         elif active_approval is not None:
             active_approval.cancel()
         else:
-            print("\nUse /exit or Ctrl-D to exit.", flush=True)
+            print("\nPaused. Send a message to continue; /exit to quit.", flush=True)
 
     async def approve(tool_call, reason):
         """将审批交给终端主循环，等待一次允许或拒绝的布尔结果。"""
@@ -166,6 +180,13 @@ async def run_interactive(harness, sessions_dir):
                 if exiting or agent_task.done():
                     break
             await agent_task
+        except asyncio.CancelledError:
+            # Task 可能尚未进入 Harness；只清理仍在运行的子任务，避免重复收尾。
+            if harness.subagents is not None and any(
+                not task.done() for task in harness.subagents.tasks.values()
+            ):
+                await harness.subagents.interrupt()
+            raise
         finally:
             if not agent_task.done():
                 agent_task.cancel()
@@ -182,21 +203,28 @@ async def run_interactive(harness, sessions_dir):
                 user_input = pending_inputs.pop(0)
             else:
                 print("> ", end="", file=sys.stderr, flush=True)
-                completion_task = asyncio.create_task(harness.processes.completion_events.get())
+                # 暂停时不取完成通知，保留到下一次聊天请求一起交给模型。
+                completion_task = (
+                    None if paused
+                    else asyncio.create_task(harness.processes.completion_events.get())
+                )
                 done, _ = await asyncio.wait(
-                    [input_task, completion_task, approval_task],
+                    [input_task, approval_task] + ([completion_task] if completion_task else []),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if completion_task in done:
-                    harness.processes.completion_events.put_nowait(completion_task.result())
-                else:
-                    completion_task.cancel()
-                    await asyncio.gather(completion_task, return_exceptions=True)
+                if completion_task is not None:
+                    if completion_task in done:
+                        harness.processes.completion_events.put_nowait(completion_task.result())
+                    else:
+                        completion_task.cancel()
+                        await asyncio.gather(completion_task, return_exceptions=True)
                 if approval_task in done:
                     await handle_approval(consume_approval())
                     continue
                 if input_task in done:
                     _, user_input = consume_input()
+                elif paused:
+                    continue
                 else:
                     user_input = None  # 后台通知单独触发一轮，不构造用户消息。
                     background_trigger = True
@@ -206,6 +234,8 @@ async def run_interactive(harness, sessions_dir):
                 break
             if user_input is not None and not user_input.strip():
                 continue
+            if user_input is not None and command_name(user_input.strip()) is None:
+                paused = False
             turn_coroutine = (
                 display_events(harness, None) if user_input is None
                 else handle_input(harness, user_input.strip(), sessions_dir)
@@ -213,8 +243,9 @@ async def run_interactive(harness, sessions_dir):
             try:
                 await run_turn(turn_coroutine)
             except asyncio.CancelledError:
+                paused = True
                 if not exiting:
-                    print("\nInterrupted. Background tasks remain available in /tasks.")
+                    print("\nInterrupted. Send a message to continue; background tasks: /tasks.")
             except Exception as error:
                 print(f"Error: {format_error(error)}", file=sys.stderr)
     finally:

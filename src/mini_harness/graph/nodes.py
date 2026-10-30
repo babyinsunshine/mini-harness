@@ -10,9 +10,13 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
 from ..responses import request_model_reply, response_problem
+from ..tools.processes import BashInterrupted
 from .types import Resources, State
 
-INTERRUPTED_TOOL = "Execution interrupted; result not confirmed. Inspect files/logs before retry."
+INTERRUPTED_TOOL = (
+    "Execution interrupted; result not confirmed. Changes may already have occurred. "
+    "Inspect files/logs or remote state before retry."
+)
 
 
 def collect_background_events(state: State, runtime: Runtime[Resources]):
@@ -148,6 +152,11 @@ async def execute_tool(state: State, runtime: Runtime[Resources]):
             exit_code = json.loads(result.text)["exit_code"]
             if exit_code not in (None, 0):
                 result.status = "error"
+    except BashInterrupted as error:
+        result = ToolMessage(
+            content=json.dumps(error.result), tool_call_id=tool_call["id"], status="error",
+        )
+        raise
     except Exception as error:
         result = ToolMessage(
             content=f"{type(error).__name__}: {error}", tool_call_id=tool_call["id"], status="error"

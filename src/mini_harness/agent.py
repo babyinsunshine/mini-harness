@@ -176,16 +176,16 @@ class Harness:
 
         input_id 用于子任务恢复去重；已接收的相同 ID 只继续上下文，不重发指令。
         """
-        if self.subagents is not None:
-            self.subagents.resume_interrupted()
-        snapshot = await self.graph.aget_state(self.config)
-        messages = self.restore_tool_messages(snapshot.values.get("messages", []))
-        last_input_id = snapshot.values.get("last_user_input_id", "")
-        # 消息可能已被摘要替换，是否接收过输入要看检查点字段，不能只查消息 ID。
-        if user_input is not None and (input_id is None or input_id != last_input_id):
-            last_input_id = input_id or f"user-{uuid4()}"
-            messages.append(HumanMessage(content=user_input, id=last_input_id))
         try:
+            if self.subagents is not None:
+                self.subagents.resume_interrupted()
+            snapshot = await self.graph.aget_state(self.config)
+            messages = self.restore_tool_messages(snapshot.values.get("messages", []))
+            last_input_id = snapshot.values.get("last_user_input_id", "")
+            # 消息可能已被摘要替换，是否接收过输入要看检查点字段，不能只查消息 ID。
+            if user_input is not None and (input_id is None or input_id != last_input_id):
+                last_input_id = input_id or f"user-{uuid4()}"
+                messages.append(HumanMessage(content=user_input, id=last_input_id))
             async for stream_mode, stream_data in self.graph.astream(
                 {
                     # snapshot 包含尚未合入检查点的工具结果；只提交新增消息会丢掉它们。
@@ -214,6 +214,17 @@ class Harness:
         except asyncio.CancelledError:
             if self.subagents is not None:
                 await self.subagents.interrupt()
+            # 工具已完成清理；把结果与未执行的调用一起保存，再交还终端。
+            snapshot = await self.graph.aget_state(self.config)
+            messages = self.restore_tool_messages(snapshot.values.get("messages", []))
+            for message in messages:
+                self.session.record_message(message)
+            await self.graph.aupdate_state(
+                self.config,
+                {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages],
+                 "pending_calls": [], "approved": False, "next": "end"},
+                as_node="response",
+            )
             raise
         yield {"type": "done"}
 
