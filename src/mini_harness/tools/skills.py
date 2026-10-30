@@ -28,8 +28,10 @@ def skill_path(session: Session, name: str) -> Path:
     return path
 
 
-def _read_skill(path: Path, name: str) -> tuple[dict, str]:
+def _read_skill(path: Path, name: str, session: Session) -> tuple[dict, str]:
     """解析 YAML 元数据与 Markdown 正文；格式错误交给现有工具错误处理。"""
+    if session.sandbox is not None:
+        session.sandbox.check_path(path)
     text = path.read_text(encoding="utf-8")
     match = re.fullmatch(r"---[ \t]*\n(.*?)\n---[ \t]*(?:\n|$)(.*)", text, re.S)
     if not match:
@@ -54,7 +56,10 @@ def list_skills(session: Session) -> list[dict]:
     catalog = []
     for path in sorted(_skills_directory(session).glob("*/SKILL.md")):
         name = path.parent.name
-        metadata, _ = _read_skill(skill_path(session, name), name)
+        try:
+            metadata, _ = _read_skill(skill_path(session, name), name, session)
+        except PermissionError:
+            continue
         catalog.append(metadata)
     return catalog
 
@@ -62,5 +67,5 @@ def list_skills(session: Session) -> list[dict]:
 def load_skill(session: Session, name: str) -> dict:
     """返回完整正文及资源基准目录；每次调用读取当前文件，不执行脚本。"""
     path = skill_path(session, name)
-    _, instructions = _read_skill(path, name)
+    _, instructions = _read_skill(path, name, session)
     return {"name": name, "directory": str(path.parent), "instructions": instructions}

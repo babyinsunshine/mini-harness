@@ -59,7 +59,7 @@ uv run mini-harness --model 'anthropic:YOUR_MODEL_ID'
 ```
 
 也可以设置 `HARNESS_MODEL`。密钥由供应商 SDK 读取，不保存到会话。
-工具使用当前用户的本地权限执行命令和修改文件；调用前执行下述权限策略，未提供操作系统沙箱。
+默认使用当前用户的本地权限，调用前执行下述权限策略；Linux/WSL2 可另行开启文件沙箱。
 
 ## 权限审批
 
@@ -87,8 +87,8 @@ uv run mini-harness --model 'anthropic:YOUR_MODEL_ID'
 程序调用 `Harness.open(..., approve=callback)` 可以提供异步 `(tool_call, reason) -> bool` 回调；
 省略回调时也不会自动放行需要审批的调用。审批前不记录 `started`，恢复会话时仍按原规则补齐工具结果。
 
-添加 `--full-access` 启用完全访问：所有工具调用直接放行，包括默认规则中的拒绝项，
-主智能体与子智能体均不询问审批；权限与工具执行日志照常记录。
+添加 `--full-access` 跳过普通工具审批，包括原默认规则中的拒绝项，主、子智能体均生效；
+权限与工具执行日志照常记录。已开启的沙箱仍然有效，沙箱扩权和临时绕过仍需明确批准。
 此开关只对本次启动生效，恢复会话时需再次传入。程序调用可使用 `Harness.open(..., full_access=True)`。
 
 ```bash
@@ -110,6 +110,53 @@ uv run mini-harness --resume SESSION_ID
 
 `--max-steps` 限制一次运行的图节点步数，默认 1000；一轮模型与工具交互会经过多个节点。
 旧会话保留原预算，需要时用 `--max-steps 1000` 覆盖。
+
+## 文件沙箱
+
+第一版支持 Linux / WSL2，默认关闭。先通过系统包管理器安装 Bubblewrap，例如 Ubuntu：
+
+```bash
+sudo apt install bubblewrap
+uv run mini-harness --sandbox --full-access
+```
+
+`sandbox.py` 保存一份运行时策略，每次 Bash 通过 Bubblewrap 创建受限进程；LangGraph 连线不变。
+宿主文件系统只读开放，初始项目目录、批准的额外目录和少量专用通道可写。
+初始范围使用会话保存的 `project_root`，不会随 `cd` 或恢复时的启动目录扩大。
+正常启动的子进程继承限制；网络与宿主共享，后台服务可由后续 Bash 调用访问。
+文件工具在读写前检查同一份策略，文件锁和版本检查继续生效。
+
+用户配置示例见 [sandbox.example.json](../examples/sandbox.example.json)，建议复制到项目外的用户配置目录：
+
+```bash
+uv run mini-harness --sandbox --sandbox-config ~/.config/mini-harness/sandbox.json
+```
+
+- `deny_paths`：明确的文件或目录路径，不支持 glob；支持 `~`，相对路径以配置文件目录为基准。
+  添加现存路径；Bash 无法落实某条遮蔽规则时会报错，不静默忽略。
+  同时禁止读取和写入，即使位于项目或已授权目录中；Skill、AGENTS.md 和压缩后的回读也遵守规则。
+- `allow_write_requests`：默认 `true`。模型用 `request_sandbox_access(paths, reason)` 申请额外可写目录。
+  批准后供主、子智能体的新调用使用，退出即清除，恢复会话重新申请。
+- `allow_bypass`：默认 `false`。用户启用后，Bash 可通过 `bypass_sandbox=true` 和 `reason` 申请一次绕过。
+  它会解除本次命令及子进程的文件沙箱限制，包括禁止路径，审批界面会明确显示。
+
+扩权与绕过只接受明确批准，普通会话信任和 `--full-access` 不代替它；无交互审批时拒绝申请。
+用户配置文件在沙箱内始终只读；批准额外父目录不会改变这一点。配置重读不清除旧上下文或历史产物中的内容。
+审批与执行使用同一份规范化目录；批准前目录目标发生变化会拒绝执行。
+禁止路径、配置和会话目录在可写范围内的祖先设为挂载点，阻止通过移动父目录暴露旧内容或替换策略。
+启动时固定 Bubblewrap 的实际程序路径，并保护它不被工具修改或被项目中新建的同名程序接管。
+`--no-sandbox` 可显式关闭，包括恢复一个原先启用沙箱的会话。配置和 Bubblewrap 不可用时会明确报错。
+
+可写例外逐项保留：当前会话的 `env.sh`、通过 `TMPDIR` 提供的独立临时空间、日志与 cwd 回传通道。
+临时文件随该次命令退出消失，后续命令需要的文件应放在项目内；宿主 `/tmp` 保持只读可见。
+SQLite、transcript 和其他管理产物由外部 harness 写入，不开放整个会话目录给命令修改。
+会话数据即使放在项目内也保持只读，仅为当前会话的专用通道单独开放。
+禁止路径优先于这些工具访问例外。包管理器缓存可指向项目内，或申请其缓存目录的写权限。
+
+MCP 服务端在本地 Bash 沙箱之外执行，保留现有权限模式；`--full-access` 下不额外询问 MCP。
+本地沙箱不约束 MCP、宿主网络服务及 Windows 桌面端的实际操作，也不提供文件回滚或资源配额。
+WSL 内默认隐藏 `/init` 和 `/run/WSL` 执行桥接入口，阻止命令直接启动不继承 Linux 限制的 Windows 程序。
+确需执行 Windows 程序时，可由用户批准一次完整绕过；沙箱外的 Windows MCP 连接不受此影响。
 
 ## 工具与执行
 
@@ -206,7 +253,7 @@ CLI 复用 `tool_end` 事件显示 `[ ]` / `[>]` / `[x]` 和完成数量，不�
 继续使用原 Session 和已有上下文，重新开始计时。`closed` 状态不再接受继续指令。
 超时或取消落在清理阶段时，会等待所有进程结束后再关闭会话、报告最终状态。
 默认审批按子会话 cwd 使用相同规则，询问交给主 CLI 并标明来源；会话信任也共用，拒绝规则仍生效。
-父智能体启用 `--full-access` 时，子智能体也直接放行所有工具调用。
+父智能体启用 `--full-access` 时，子智能体同样跳过普通审批；共享的沙箱规则及明确扩权审批仍然有效。
 
 Ctrl-C 取消父轮次时会中断运行中的子智能体；退出 CLI 同样等待它们清理并保存 `interrupted`。
 恢复父对话的下一轮会自动在原子 Session 中继续，补齐缺失工具结果，不直接重放中断命令。
@@ -391,6 +438,7 @@ Micro 是可移植的本地实现，不依赖 Anthropic 内部 cache_edits；裁
 ├── runtime.sqlite      # 运行元数据和工具执行记录
 ├── transcript.jsonl    # 原始消息和执行/压缩事件，追加写入
 ├── env.sh              # 唯一的会话环境脚本，自动创建，智能体可修改
+├── tmp/                # 沙箱临时挂载点，命令内的内容不保存到宿主
 └── artifacts/          # 完整工具输出、进程日志、cwd 回传文件
 ```
 
@@ -413,6 +461,7 @@ Ctrl-D 或 `/exit` 退出并清理进程和子智能体运行资源。
 src/mini_harness/
 ├── agent.py             # 会话入口：组装资源、恢复结果、流接口
 ├── subagents.py         # 子会话委派、继续、超时、关闭与恢复
+├── sandbox.py           # 共享路径规则、临时授权与 Bubblewrap 参数
 ├── graph/
 │   ├── builder.py       # 六阶段连线与退出条件
 │   ├── nodes.py         # 每个阶段做什么

@@ -107,11 +107,18 @@ async def run_interactive(harness, sessions_dir):
         )
         source = f" (subagent {tool_call['agent_id']})" if "agent_id" in tool_call else ""
         print(f"\nApproval{source}: {tool_call['name']}\n{target}\n{reason}", file=sys.stderr)
-        print(
-            "Session trust includes future commands and outside-project access.",
-            file=sys.stderr,
-        )
-        print("Allow? [y=once/a=trust session/N=deny] ", end="", file=sys.stderr, flush=True)
+        sandbox_request = tool_call.get("sandbox_request", False)
+        if sandbox_request:
+            prompt = "Allow? [y=allow/N=deny] "
+        else:
+            print(
+                "Session trust skips ordinary prompts; sandbox boundaries still apply."
+                if harness.session.sandbox is not None else
+                "Session trust includes future commands and outside-project access.",
+                file=sys.stderr,
+            )
+            prompt = "Allow? [y=once/a=trust session/N=deny] "
+        print(prompt, end="", file=sys.stderr, flush=True)
         approval_requested_at = monotonic()
         active_approval = approval_future
         try:
@@ -132,13 +139,15 @@ async def run_interactive(harness, sessions_dir):
                     pending_inputs.append(user_input)
                     continue
                 decision = user_input.strip().lower()
-                if decision == "a":
+                if decision == "a" and not sandbox_request:
                     harness.permissions.session_trusted = True
                     print(
                         "Session trusted until exit; explicit deny rules still apply.",
                         file=sys.stderr,
                     )
-                approval_future.set_result(decision in {"y", "yes", "a"})
+                approval_future.set_result(
+                    decision in {"y", "yes"} or (decision == "a" and not sandbox_request)
+                )
         finally:
             active_approval = None
 

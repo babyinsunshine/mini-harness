@@ -24,6 +24,7 @@ uv run mini-harness
 - **会话**：SQLite 检查点、中断恢复、任务清单和缓存统计。
 - **子智能体**：独立会话并行工作，支持继续、关闭和超时清理。
 - **文件协作**：短时文件锁与各会话的哈希校验，冲突时提示重新读取。
+- **可选沙箱**：Linux/WSL2 下限制文件写入范围，支持用户批准扩权或临时绕过。
 - **扩展**：Skills 和 MCP 都通过工具按需发现与调用。
 
 ## 常用操作
@@ -33,11 +34,13 @@ uv run mini-harness --cwd /path/to/project
 uv run mini-harness -p '查看项目并解释测试入口'
 uv run mini-harness --list-sessions
 uv run mini-harness --resume SESSION_ID
+uv run mini-harness --sandbox --full-access
 uv run mini-harness --help
 ```
 
 交互命令：`/help`、`/compact`、`/tasks`、`/stats`、`/sessions`、`/exit`。
-默认执行权限审批；`--full-access` 跳过全部审批。当前执行环境使用本机权限，尚无操作系统沙箱。
+默认执行普通权限审批；`--full-access` 跳过普通审批，仍保留已开启的沙箱边界和扩权审批。
+沙箱需要安装 `bubblewrap`，配置与使用见[文件沙箱](docs/architecture.md#文件沙箱)。
 
 ## Skills 与 MCP
 
@@ -61,6 +64,7 @@ src/mini_harness/
 ├── context/       # 上下文压缩与预算
 ├── tools/         # 文件、进程、权限、计划、子智能体、Skills、MCP
 ├── session.py     # 会话元数据、执行记录和文件产物
+├── sandbox.py     # 文件边界、临时授权与 Bubblewrap 启动参数
 ├── subagents.py   # 子智能体生命周期
 ├── prompts/       # 提示词
 └── cli/           # 输入、事件显示和统计

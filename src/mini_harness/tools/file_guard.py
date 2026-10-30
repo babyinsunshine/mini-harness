@@ -28,6 +28,10 @@ def access_file(
 ):
     """短时独占访问；修改前检查版本，成功后记录版本，关闭句柄自动释放锁。"""
     target = target.resolve()
+    if session.sandbox is not None:
+        session.sandbox.check_path(
+            target, writing=writing, env_file=session.directory / "env.sh",
+        )
     lock_directory = Path(session.get("project_root")) / ".mini-harness" / "file-locks"
     lock_directory.mkdir(parents=True, exist_ok=True)
     lock_name = hashlib.sha256(str(target).encode()).hexdigest()

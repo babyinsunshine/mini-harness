@@ -68,14 +68,32 @@ def create_tools(
         return session.prepare_tool_output(edit_file(session, path, old_text, new_text))
 
     @tool
-    async def bash(command: str, timeout: float = 120, run_in_background: bool = False) -> dict:
+    async def bash(
+        command: str, timeout: float = 120, run_in_background: bool = False,
+        bypass_sandbox: bool = False, reason: str | None = None,
+    ) -> dict:
         """Run Bash. timeout is foreground wait time in seconds.
 
         Unfinished commands go to background.
         Each call is a new process. Main foreground cwd persists; exports do not.
         Read the output_path for full logs. Background directory changes are isolated.
+        bypass_sandbox requests user approval to run this command outside the sandbox
+        once; supply a reason. This requires the user to enable bypass requests.
         """
-        return await processes.run(command, timeout, run_in_background)
+        return await processes.run(
+            command, timeout, run_in_background, bypass_sandbox=bypass_sandbox,
+        )
+
+    @tool("request_sandbox_access")
+    async def request_sandbox_access(paths: list[str], reason: str) -> dict:
+        """Ask the user to make existing absolute directories writable until harness exits.
+
+        Explain why access is needed. Approval is required even with full access or
+        session trust. Deny paths remain blocked. Grants are shared with subagents,
+        are not saved, and must be requested again after restarting the harness.
+        """
+        session.sandbox.grant(paths)
+        return session.sandbox.status()
 
     @tool
     async def send_input(task_id: str, text: str = "", eof: bool = False) -> dict:
@@ -93,6 +111,8 @@ def create_tools(
     ]
     if include_plan:
         tools.append(update_plan_tool)
+    if session.sandbox is not None:
+        tools.append(request_sandbox_access)
     if subagents is not None:
         tools.extend(create_agent_tools(subagents))
     if mcp_clients:

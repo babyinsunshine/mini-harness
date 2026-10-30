@@ -17,6 +17,7 @@ class Session:
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.id = self.directory.name
+        self.sandbox = None  # 运行时策略；额外授权不随 SQLite 恢复。
         self.database = self.directory / "state.sqlite"
         self.runtime_database = self.directory / "runtime.sqlite"
         self._lock = self.database.open("a+b")
