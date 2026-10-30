@@ -121,7 +121,7 @@ def tool_history(counts=(1,) * 8, size=1800):
     return messages
 
 
-def test_reactive_keeps_last_tool_group_after_final_reply_with_large_fixed_overhead(tmp_path):
+def test_reactive_keeps_only_latest_request_and_tool_group_with_large_fixed_overhead(tmp_path):
     messages = tool_history(counts=(1,) * 4, size=5000)
     messages.extend([
         AIMessage(content="Finished inspecting", id="final-reply"),
@@ -132,7 +132,52 @@ def test_reactive_keeps_last_tool_group_after_final_reply_with_large_fixed_overh
     results = {m.tool_call_id for m in result if isinstance(m, ToolMessage)}
     assert "call-3-0" in results
     assert "call-0-0" not in results
-    assert any(m.id == "final-reply" for m in result)
+    assert not any(m.id == "final-reply" for m in result)
+    assert any(m.id == "user-latest" for m in result)
+
+
+def test_reactive_can_drop_old_summaries_and_whole_skill_groups(tmp_path):
+    recent = tool_history(counts=(2,), size=2000)
+    messages = [
+        HumanMessage(content="[Conversation continuation summary]\n" + "old " * 300,
+                     id="summary-1"),
+        HumanMessage(content="[Conversation continuation summary]\n" + "old " * 300,
+                     id="summary-2"),
+        AIMessage(content="", id="skill-call", tool_calls=[{
+            "name": "load_skill", "args": {"name": "testing"}, "id": "skill-old",
+        }]),
+        ToolMessage(content="Testing conventions. " * 3000, name="load_skill",
+                    tool_call_id="skill-old", id="skill-result"),
+        *recent,
+    ]
+    with Session(tmp_path / "s", tmp_path) as session:
+        result = reactive_compact(messages, session, ContextPolicy())
+    assert all(message in result for message in recent)
+    assert {"summary-1", "summary-2", "skill-call", "skill-result"}.isdisjoint(
+        message.id for message in result
+    )
+    calls = {call["id"] for message in result if isinstance(message, AIMessage)
+             for call in message.tool_calls}
+    assert calls == {message.tool_call_id for message in result if isinstance(message, ToolMessage)}
+    assert estimate_tokens(result) < estimate_tokens(messages) / 2
+
+
+@pytest.mark.parametrize("latest_input", [
+    "Preserve the authentication API. ", "[Response repair] is a literal in my code. ",
+])
+def test_reactive_preserves_real_user_instead_of_internal_response_repair(tmp_path, latest_input):
+    user = HumanMessage(content=latest_input + "x" * 18000, id="user-latest")
+    messages = [
+        HumanMessage(content="Old context. " * 1000, id="user-old"),
+        AIMessage(content="Previous answer", id="answer-old"),
+        user,
+        AIMessage(content="Partial answer", id="partial"),
+        HumanMessage(content="[Response repair]\nPlease provide a complete reply.", id="repair"),
+    ]
+    with Session(tmp_path / "s", tmp_path) as session:
+        result = reactive_compact(messages, session, ContextPolicy())
+    assert user in result
+    assert not any(message.id == "user-old" for message in result)
 
 
 def test_micro_default_budget_keeps_recent_output_during_one_long_user_turn(tmp_path):
@@ -348,7 +393,8 @@ async def test_reactive_trims_old_groups_without_summarizing_and_returns_recover
         ids = {m.id for m in retried}
         assert {"assistant-0", "result-0-0"}.isdisjoint(ids)
         assert {"assistant-1", "result-1-0", "assistant-2", "result-2-0", "result-2-1"} <= ids
-        assert {"summary", "latest-user"} <= ids
+        assert "summary" not in ids
+        assert "latest-user" in ids
         assert any(m.content.startswith("[Runtime context]") for m in retried)
         assert str(session.transcript) in retried[0].content
         assert "omitted" in retried[0].content
