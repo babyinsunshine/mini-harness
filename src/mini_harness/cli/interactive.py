@@ -1,117 +1,144 @@
-"""终端输入、会话命令、审批与中断；只有一个线程读取 stdin。"""
+"""终端交互状态与调度；只有一个线程读取 stdin。"""
 
-import argparse
 import asyncio
 import json
-import shlex
 import signal
 import sys
 import threading
+from collections import deque
 from time import monotonic
 
 from ..responses import format_error
-from .config import list_sessions
+from .commands import command_name, handle_input
 from .display import display_events
-from .usage import format_session_usage
-
-
-def command_name(user_input):
-    """只识别已有终端命令；以 / 开头的文件路径等仍然是聊天。"""
-    if user_input in {"/tasks", "/stats", "/sessions", "/help"}:
-        return user_input
-    if user_input == "/compact" or user_input.startswith("/compact "):
-        return "/compact"
-    return None
-
-
-async def handle_input(harness, user_input, sessions_dir):
-    """处理斜杠命令或聊天输入；sessions_dir 是所有会话的存放目录。"""
-    command = command_name(user_input)
-    if command == "/tasks":
-        for task in harness.processes.tasks.values():
-            print(json.dumps(harness.processes.describe_task(task), ensure_ascii=False))
-        if harness.subagents is not None:
-            for agent in harness.subagents.agents.values():
-                print(json.dumps({key: agent[key] for key in (
-                    "agent_id", "status", "session_dir"
-                )}, ensure_ascii=False))
-    elif command == "/stats":
-        print(format_session_usage(harness.session))
-    elif command == "/sessions":
-        print("\n".join(list_sessions(sessions_dir)))
-    elif command == "/help":
-        print("/compact [--from N --to M] [focus]  /tasks  /stats  /sessions  /exit")
-    elif command == "/compact":
-        options = argparse.ArgumentParser(add_help=False, exit_on_error=False)
-        options.add_argument("--from", dest="start_group", type=int)
-        options.add_argument("--to", dest="end_group", type=int)
-        compact_args, summary_instructions = options.parse_known_args(shlex.split(user_input)[1:])
-        await harness.compact(
-            " ".join(summary_instructions), compact_args.start_group, compact_args.end_group
-        )
-        print("Context compacted.")
-    else:
-        await display_events(harness, user_input)
 
 
 async def run_interactive(harness, sessions_dir):
-    """一个输入线程；主循环协调聊天、审批、后台事件和当前 agent 轮次。"""
-    loop = asyncio.get_running_loop()
-    input_queue, approval_queue = asyncio.Queue(), asyncio.Queue()
-    agent_task = None
-    input_task = asyncio.create_task(input_queue.get())
-    approval_task = asyncio.create_task(approval_queue.get())
-    active_approval = None
-    pending_inputs = []
-    exiting = False
-    paused = False
+    """保留简单入口，交互期间的状态由一个 CLI 实例持有。"""
+    await InteractiveCLI(harness, sessions_dir).run()
 
-    def read_stdin():
-        # 持续读取并记录到达时间，模型思考期间的输入仍然是聊天，不是未来的审批。
-        while True:
-            try:
-                user_input = input()
-            except EOFError:
-                user_input = None
-            try:
-                loop.call_soon_threadsafe(input_queue.put_nowait, (monotonic(), user_input))
-            except RuntimeError:
-                return
-            if user_input is None or user_input.strip() in {"/exit", "/quit"}:
-                return
 
-    def consume_input():
-        nonlocal input_task
-        item = input_task.result()
-        input_task = asyncio.create_task(input_queue.get())
-        return item
+class InteractiveCLI:
+    """持有一次终端交互的状态；工具执行与会话存储仍交给 Harness。"""
 
-    def interrupt():
-        nonlocal paused
-        paused = True
-        if agent_task is not None and not agent_task.done():
-            if not agent_task.cancelling():  # 再按 Ctrl-C 也要等当前清理完成。
-                agent_task.cancel()
-        elif active_approval is not None:
-            active_approval.cancel()
-        else:
-            print("\nPaused. Send a message to continue; /exit to quit.", flush=True)
+    def __init__(self, harness, sessions_dir):
+        self.harness, self.sessions_dir = harness, sessions_dir
+        self.loop = None
+        self.input_queue, self.approval_queue = asyncio.Queue(), asyncio.Queue()
+        self.input_task = self.approval_task = self.turn_task = None
+        self.active_approval = None
+        self.queued_inputs = deque()
+        self.paused = False
+        self.exiting = False
 
-    async def approve(tool_call, reason):
-        """将审批交给终端主循环，等待一次允许或拒绝的布尔结果。"""
-        approval_future = loop.create_future()
-        await approval_queue.put((tool_call, reason, approval_future))
+    async def run(self):
+        """启动监听，协调空闲与运行状态，退出时统一释放监听资源。"""
+        self.loop = asyncio.get_running_loop()
+        try:
+            self.input_task = asyncio.create_task(self.input_queue.get())
+            self.approval_task = asyncio.create_task(self.approval_queue.get())
+            self.harness.permissions.approve = self.approve
+            self.loop.add_signal_handler(signal.SIGINT, self.interrupt)
+            threading.Thread(
+                target=self._read_stdin, args=(self.loop, self.input_queue), daemon=True,
+            ).start()
+            while not self.exiting:
+                kind, value = await self.wait_for_activity()
+                if kind == "approval":
+                    await self.handle_approval(value)
+                    continue
+                if kind == "input":
+                    if value is None:
+                        break
+                    user_input = value.strip()
+                    if user_input in {"/exit", "/quit"}:
+                        break
+                    if not user_input:
+                        continue
+                    if command_name(user_input) is None:
+                        self.paused = False
+                    turn = handle_input(self.harness, user_input, self.sessions_dir)
+                else:
+                    if self.paused:
+                        continue
+                    turn = display_events(self.harness, None)
+                try:
+                    await self.run_turn(turn)
+                except asyncio.CancelledError:
+                    self.paused = True
+                    if not self.exiting:
+                        print(
+                            "\nInterrupted. Send a message to continue; background tasks: /tasks."
+                        )
+                except Exception as error:
+                    print(f"Error: {format_error(error)}", file=sys.stderr)
+        finally:
+            await self.close()
+
+    async def wait_for_activity(self):
+        """返回 (input, 文本/EOF)、(approval, 审批请求) 或 (background, None)。"""
+        if self.queued_inputs:
+            return "input", self.queued_inputs.popleft()
+        print("> ", end="", file=sys.stderr, flush=True)
+        # 暂停时不监听完成通知，留到下一次聊天请求一起处理。
+        completion_task = (
+            None if self.paused
+            else asyncio.create_task(self.harness.processes.completion_events.get())
+        )
+        waiters = [self.input_task, self.approval_task]
+        if completion_task is not None:
+            waiters.append(completion_task)
+        try:
+            done, _ = await asyncio.wait(
+                waiters, return_when=asyncio.FIRST_COMPLETED,
+            )
+            if self.approval_task in done:
+                return "approval", self._consume_approval()
+            if self.input_task in done:
+                return "input", self._consume_input()[1]
+            return "background", None
+        finally:
+            if completion_task is not None:
+                completion_task.cancel()
+                await asyncio.gather(completion_task, return_exceptions=True)
+                # 这里只唤醒主循环，通知内容仍由图收集；取消与完成同时发生也不能丢消息。
+                if not completion_task.cancelled():
+                    self.harness.processes.completion_events.put_nowait(completion_task.result())
+
+    async def run_turn(self, turn_coroutine):
+        """执行一轮并响应审批；取消后等待图和子任务完成收尾。"""
+        self.turn_task = asyncio.create_task(turn_coroutine)
+        try:
+            while not self.turn_task.done():
+                done, _ = await asyncio.wait(
+                    [self.turn_task, self.approval_task], return_when=asyncio.FIRST_COMPLETED,
+                )
+                if self.turn_task in done:
+                    break
+                await self.handle_approval(self._consume_approval())
+                if self.exiting or self.turn_task.done():
+                    break
+            await self.turn_task
+        except asyncio.CancelledError:
+            # Task 可能尚未进入 Harness；只清理仍在运行的子任务，避免重复收尾。
+            manager = self.harness.subagents
+            if manager is not None and any(not task.done() for task in manager.tasks.values()):
+                await manager.interrupt()
+            raise
+        finally:
+            if not self.turn_task.done():
+                self.turn_task.cancel()
+            await asyncio.gather(self.turn_task, return_exceptions=True)
+            self.turn_task = None
+
+    async def approve(self, tool_call, reason):
+        """供权限模块调用：将审批交给终端，等待一次允许或拒绝。"""
+        approval_future = self.loop.create_future()
+        await self.approval_queue.put((tool_call, reason, approval_future))
         return await approval_future
 
-    def consume_approval():
-        nonlocal approval_task
-        request = approval_task.result()
-        approval_task = asyncio.create_task(approval_queue.get())
-        return request
-
-    async def handle_approval(request):
-        """主轮运行和终端空闲时共用；子任务超时取消 future 后立即结束等待。"""
-        nonlocal exiting, active_approval
+    async def handle_approval(self, request):
+        """主轮运行和空闲时共用；输入按到达时间区分聊天与审批回答。"""
         tool_call, reason, approval_future = request
         if approval_future.done():
             return
@@ -127,34 +154,34 @@ async def run_interactive(harness, sessions_dir):
         else:
             print(
                 "Session trust skips ordinary prompts; sandbox boundaries still apply."
-                if harness.session.sandbox is not None else
+                if self.harness.session.sandbox is not None else
                 "Session trust includes future commands and outside-project access.",
                 file=sys.stderr,
             )
             prompt = "Allow? [y=once/a=trust session/N=deny] "
         print(prompt, end="", file=sys.stderr, flush=True)
         approval_requested_at = monotonic()
-        active_approval = approval_future
+        self.active_approval = approval_future
         try:
             while not approval_future.done():
                 done, _ = await asyncio.wait(
-                    [approval_future, input_task], return_when=asyncio.FIRST_COMPLETED
+                    [approval_future, self.input_task], return_when=asyncio.FIRST_COMPLETED,
                 )
                 if approval_future in done:
                     break
-                received_at, user_input = consume_input()
+                received_at, user_input = self._consume_input()
                 if user_input is None or user_input.strip() in {"/exit", "/quit"}:
-                    exiting = True
+                    self.exiting = True
                     approval_future.cancel()
-                    if agent_task is not None:
-                        agent_task.cancel()
+                    if self.turn_task is not None:
+                        self.turn_task.cancel()
                     break
                 if received_at < approval_requested_at:
-                    pending_inputs.append(user_input)
+                    self.queued_inputs.append(user_input)
                     continue
                 decision = user_input.strip().lower()
                 if decision == "a" and not sandbox_request:
-                    harness.permissions.session_trusted = True
+                    self.harness.permissions.session_trusted = True
                     print(
                         "Session trusted until exit; explicit deny rules still apply.",
                         file=sys.stderr,
@@ -163,95 +190,51 @@ async def run_interactive(harness, sessions_dir):
                     decision in {"y", "yes"} or (decision == "a" and not sandbox_request)
                 )
         finally:
-            active_approval = None
+            self.active_approval = None
 
-    async def run_turn(turn_coroutine):
-        """执行一轮，同时处理审批；获准前工具仍等待在 permission 节点。"""
-        nonlocal agent_task, exiting
-        agent_task = asyncio.create_task(turn_coroutine)
-        try:
-            while not agent_task.done():
-                done, _ = await asyncio.wait(
-                    [agent_task, approval_task], return_when=asyncio.FIRST_COMPLETED
-                )
-                if agent_task in done:
-                    break
-                await handle_approval(consume_approval())
-                if exiting or agent_task.done():
-                    break
-            await agent_task
-        except asyncio.CancelledError:
-            # Task 可能尚未进入 Harness；只清理仍在运行的子任务，避免重复收尾。
-            if harness.subagents is not None and any(
-                not task.done() for task in harness.subagents.tasks.values()
-            ):
-                await harness.subagents.interrupt()
-            raise
-        finally:
-            if not agent_task.done():
-                agent_task.cancel()
-            await asyncio.gather(agent_task, return_exceptions=True)
-            agent_task = None
+    def interrupt(self):
+        """Ctrl-C 暂停自动继续；重复按键不取消正在进行的清理。"""
+        self.paused = True
+        if self.turn_task is not None and not self.turn_task.done():
+            if not self.turn_task.cancelling():
+                self.turn_task.cancel()
+        elif self.active_approval is not None:
+            self.active_approval.cancel()
+        else:
+            print("\nPaused. Send a message to continue; /exit to quit.", flush=True)
 
-    harness.permissions.approve = approve
-    threading.Thread(target=read_stdin, daemon=True).start()
-    loop.add_signal_handler(signal.SIGINT, interrupt)
-    try:
-        while not exiting:
-            background_trigger = False
-            if pending_inputs:
-                user_input = pending_inputs.pop(0)
-            else:
-                print("> ", end="", file=sys.stderr, flush=True)
-                # 暂停时不取完成通知，保留到下一次聊天请求一起交给模型。
-                completion_task = (
-                    None if paused
-                    else asyncio.create_task(harness.processes.completion_events.get())
-                )
-                done, _ = await asyncio.wait(
-                    [input_task, approval_task] + ([completion_task] if completion_task else []),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if completion_task is not None:
-                    if completion_task in done:
-                        harness.processes.completion_events.put_nowait(completion_task.result())
-                    else:
-                        completion_task.cancel()
-                        await asyncio.gather(completion_task, return_exceptions=True)
-                if approval_task in done:
-                    await handle_approval(consume_approval())
-                    continue
-                if input_task in done:
-                    _, user_input = consume_input()
-                elif paused:
-                    continue
-                else:
-                    user_input = None  # 后台通知单独触发一轮，不构造用户消息。
-                    background_trigger = True
-            if user_input is None and not background_trigger:
-                break
-            if user_input is not None and user_input.strip() in {"/exit", "/quit"}:
-                break
-            if user_input is not None and not user_input.strip():
-                continue
-            if user_input is not None and command_name(user_input.strip()) is None:
-                paused = False
-            turn_coroutine = (
-                display_events(harness, None) if user_input is None
-                else handle_input(harness, user_input.strip(), sessions_dir)
-            )
+    async def close(self):
+        """释放输入/审批监听并移除 CLI 设置的回调；图与进程由各自所有者清理。"""
+        self.harness.permissions.approve = None
+        self.harness.permissions.session_trusted = False
+        if self.loop is not None:
+            self.loop.remove_signal_handler(signal.SIGINT)
+        tasks = [task for task in (self.input_task, self.approval_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
+    def _read_stdin(loop, input_queue):
+        # 唯一 stdin 读取者；时间戳防止模型运行期间输入的聊天被当成未来审批。
+        while True:
             try:
-                await run_turn(turn_coroutine)
-            except asyncio.CancelledError:
-                paused = True
-                if not exiting:
-                    print("\nInterrupted. Send a message to continue; background tasks: /tasks.")
-            except Exception as error:
-                print(f"Error: {format_error(error)}", file=sys.stderr)
-    finally:
-        harness.permissions.approve = None
-        harness.permissions.session_trusted = False
-        loop.remove_signal_handler(signal.SIGINT)
-        input_task.cancel()
-        approval_task.cancel()
-        await asyncio.gather(input_task, approval_task, return_exceptions=True)
+                user_input = input()
+            except EOFError:
+                user_input = None
+            try:
+                loop.call_soon_threadsafe(input_queue.put_nowait, (monotonic(), user_input))
+            except RuntimeError:
+                return
+            if user_input is None or user_input.strip() in {"/exit", "/quit"}:
+                return
+
+    def _consume_input(self):
+        item = self.input_task.result()
+        self.input_task = asyncio.create_task(self.input_queue.get())
+        return item
+
+    def _consume_approval(self):
+        request = self.approval_task.result()
+        self.approval_task = asyncio.create_task(self.approval_queue.get())
+        return request

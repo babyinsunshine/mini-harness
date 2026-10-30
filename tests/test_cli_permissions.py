@@ -64,6 +64,37 @@ def write_call(target, call_id="write"):
     return call("write_file", {"path": str(target), "content": "approved"}, call_id)
 
 
+@pytest.mark.parametrize("completion_ready", [False, True])
+async def test_canceling_idle_cli_leaves_background_notifications_available(
+    tmp_path, monkeypatch, completion_ready,
+):
+    ready = asyncio.Event()
+    original = asyncio.wait
+
+    async def pause_after_completion(tasks, **kwargs):
+        result = await original(tasks, **kwargs)
+        if len(tasks) == 3:  # 暂停在真实队列已取出通知、主循环尚未处理的位置。
+            ready.set()
+            await asyncio.Event().wait()
+        return result
+
+    if completion_ready:
+        monkeypatch.setattr(asyncio, "wait", pause_after_completion)
+    async with cli_session(tmp_path, monkeypatch, ScriptedModel()) as (harness, _, running):
+        if completion_ready:
+            task = await harness.processes.run("printf completed", run_in_background=True)
+            await harness.processes.tasks[task["task_id"]].watch_task
+            await asyncio.wait_for(ready.wait(), 5)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        if not completion_ready:
+            task = await harness.processes.run("printf completed", run_in_background=True)
+            await harness.processes.tasks[task["task_id"]].watch_task
+        event = await asyncio.wait_for(harness.processes.completion_events.get(), 0.5)
+        assert event["task_id"] == task["task_id"]
+
+
 @pytest.mark.parametrize("answer, exists", [("y", True), ("yes", True), ("n", False), ("", False)])
 async def test_cli_approval(tmp_path, monkeypatch, answer, exists):
     target = tmp_path / "outside.txt"
