@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from test_agent_cli import ScriptedModel, call, consume
 from test_context import SummaryModel, policy, tool_history
 
@@ -113,26 +113,35 @@ async def test_compaction_restores_latest_plan_and_does_not_repeat_unchanged_con
         assert sum(str(m.content).startswith("[Runtime context]") for m in prepared) == len(runtime)
 
 
-async def test_overflow_retry_keeps_current_plan_visible_to_the_model(tmp_path):
+async def test_overflow_retry_rebuilds_only_current_runtime_context(tmp_path):
     with Session(tmp_path / "session", tmp_path) as session:
         tools = {tool.name: tool for tool in create_tools(session, None)}
         await tools["update_plan"].ainvoke({
             "plan": [{"step": "Verify exported API", "status": "in_progress"}]
         })
         context = ContextManager(session, SummaryModel(), policy())
-        messages = context.with_runtime_context(tool_history(counts=(1,) * 4, size=9000))
+        messages = context.with_runtime_context([
+            HumanMessage(content="[Runtime context]\nObsolete plan.", id="runtime-obsolete"),
+            *tool_history(counts=(1,) * 4, size=9000),
+        ])
         attempts = []
 
         async def invoke_model(request):
             attempts.append(request)
             if len(attempts) == 1:
+                await tools["update_plan"].ainvoke({
+                    "plan": [{"step": "Run the full test suite", "status": "in_progress"}]
+                })
                 raise RuntimeError("prompt_too_long")
             return AIMessage(content="Recovered")
 
         reply, retained = await context.request_model(messages, invoke_model)
         assert reply.content == "Recovered" and len(attempts) == 2
         assert len(retained) < len(messages)
-        assert any("Verify exported API" in str(m.content) for m in attempts[-1])
+        runtime = [m for m in attempts[-1] if (m.id or "").startswith("runtime-")]
+        assert len(runtime) == 1 and "Run the full test suite" in runtime[0].content
+        assert "Obsolete plan" not in str(attempts[-1])
+        assert "Verify exported API" not in str(attempts[-1])
 
 
 async def test_plan_survives_reopening_and_empty_update_clears_it(tmp_path):

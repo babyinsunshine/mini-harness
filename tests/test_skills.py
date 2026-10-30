@@ -6,7 +6,7 @@ from test_agent_cli import ScriptedModel, call, consume
 from test_context import SummaryModel, policy
 
 from mini_harness.agent import Harness
-from mini_harness.context.compact import micro_compact, reactive_compact
+from mini_harness.context.compact import micro_compact
 from mini_harness.context.manager import ContextManager
 from mini_harness.session import Session
 from mini_harness.tools.factory import create_tools
@@ -157,8 +157,10 @@ async def test_compacting_only_skill_instructions_explains_why_they_are_retained
         assert messages[1].content == "Keep the testing conventions."
 
 
-@pytest.mark.parametrize("mode", ["micro", "summary", "partial", "reactive"])
-async def test_compaction_preserves_skill_instructions_and_the_whole_tool_group(tmp_path, mode):
+@pytest.mark.parametrize("mode", ["micro", "summary", "partial"])
+async def test_regular_compaction_preserves_skill_instructions_and_the_whole_tool_group(
+    tmp_path, mode,
+):
     skill_calls = [
         {"name": "load_skill", "args": {"name": "python-testing"}, "id": "skill"},
         {"name": "read_file", "args": {"path": "guide.md"}, "id": "parallel"},
@@ -187,8 +189,6 @@ async def test_compaction_preserves_skill_instructions_and_the_whole_tool_group(
         if mode == "micro":
             result = micro_compact(messages, session, settings)
             assert "cleared" in next(m.content for m in result if m.id == "old-result")
-        elif mode == "reactive":
-            result = reactive_compact(messages, session, settings)
         else:
             bounds = {"start_group": 1, "end_group": 3} if mode == "partial" else {}
             result = await context.compact(messages, **bounds)

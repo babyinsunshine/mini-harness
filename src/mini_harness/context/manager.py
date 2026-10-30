@@ -82,9 +82,15 @@ class ContextManager:
         except Exception as error:
             if not is_context_overflow(error):
                 raise
+        # 运行信息单独重建并计入固定预算；旧摘要和技能随普通历史一起裁掉。
+        before_tokens = estimate_tokens(messages) + self.overhead_tokens
+        runtime_context = self.with_runtime_context([])
+        history = [message for message in messages if not (message.id or "").startswith("runtime-")]
+        fixed_tokens = self.overhead_tokens + estimate_tokens(runtime_context)
         recovered_messages = reactive_compact(
-            messages, self.session, self.policy, self.overhead_tokens
+            history, self.session, self.policy, fixed_tokens, before_tokens=before_tokens,
         )
+        recovered_messages.extend(runtime_context)
         self.session.set("last_model_request_at", time())
         reply = await invoke_model(recovered_messages)
         self.session.set("compact_failures", 0)

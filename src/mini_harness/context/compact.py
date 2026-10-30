@@ -20,6 +20,7 @@ INTERNAL_CONTEXT_PREFIXES = (
     "[Conversation continuation summary]",
     "[Re-read after compaction:",
     "[Context overflow recovery]",
+    "[Response repair]",
 )
 
 
@@ -248,38 +249,18 @@ def is_user_message(message: AnyMessage) -> bool:
 
 
 def reactive_compact(
-    messages: list[AnyMessage], session: Session, policy: ContextPolicy, overhead: int = 0
+    messages: list[AnyMessage], session: Session, policy: ContextPolicy, overhead: int = 0,
+    *, before_tokens: int | None = None,
 ) -> list[AnyMessage]:
-    """Reactive：实际超限后裁掉最老的完整组，以减半为目标，不调用摘要模型。"""
+    """Reactive：从头删组，只保护最新请求和最后工具组，以失败请求的估算量减半为目标。"""
     groups = group_messages(messages)
-    tail = next(
-        (i for i in range(len(groups) - 1, -1, -1) if isinstance(groups[i][0], AIMessage)),
-        len(groups) - 1,
+    latest_user = next(
+        (message for message in reversed(messages) if is_user_message(message)), None,
     )
-    # 普通回复之前的最近工具组也保留，但不跨越该回复所属的用户轮次。
-    for index in range(tail, -1, -1):
-        message = groups[index][0]
-        if is_user_message(message):
-            break
-        if isinstance(message, AIMessage) and message.tool_calls:
-            tail = index
-            break
-    # 最新工具组（没有工具时为最新 assistant）及后续用户输入、内部通知一起保留。
-    protected = {m.id for m in flatten_groups(groups[tail:])}
-    protected.update(
-        m.id for m in messages
-        if isinstance(m, HumanMessage)
-        and not (m.id or "").startswith("user-")
-        and str(m.content).startswith("[Conversation continuation summary]")
+    latest_tools = next(
+        (group for group in reversed(groups) if isinstance(group[0], AIMessage)
+         and (group[0].tool_calls or group[0].invalid_tool_calls)), None,
     )
-    for message in reversed(messages):
-        if is_user_message(message):
-            protected.add(message.id)
-            break
-    for message in reversed(messages):
-        if (message.id or "").startswith("runtime-"):
-            protected.add(message.id)
-            break
 
     notice = HumanMessage(
         content=(
@@ -288,13 +269,14 @@ def reactive_compact(
         ),
         id=str(uuid4()),
     )
-    before = estimate_tokens(messages) + overhead
+    input_tokens = estimate_tokens(messages) + overhead
+    before = input_tokens if before_tokens is None else before_tokens
     target = min(policy.block_limit, before // 2)
-    remaining = before + estimate_tokens([notice])
+    remaining = input_tokens + estimate_tokens([notice])
     kept = []
     for group in groups:
-        is_protected = has_skill_instructions(group) or any(m.id in protected for m in group)
-        if remaining > target and not is_protected:
+        protected = group is latest_tools or any(message is latest_user for message in group)
+        if remaining > target and not protected:
             remaining -= estimate_tokens(group)
         else:
             kept.extend(group)
@@ -302,6 +284,6 @@ def reactive_compact(
     if estimate_tokens(result) + overhead >= min(before, policy.block_limit):
         raise ValueError(
             "Context cannot be reduced further while preserving the latest request "
-            "and protected context; inspect transcript or adjust the model window"
+            "and last tool group; inspect transcript or adjust the model window"
         )
     return result
