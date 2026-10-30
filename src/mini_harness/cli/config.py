@@ -51,7 +51,7 @@ def build_parser():
         "--micro-idle-seconds", type=float, help="Request gap before stronger Micro pruning"
     )
     cli_parser.add_argument("--auto-compact", action=argparse.BooleanOptionalAction, default=None)
-    cli_parser.add_argument("--max-steps", type=int, help="Graph node step limit (default: 1000)")
+    cli_parser.add_argument("--max-steps", type=int, help="Graph node step limit (default: 100000)")
     cli_parser.add_argument(
         "--process-timeout", type=float, help="Maximum command runtime in seconds"
     )
@@ -71,7 +71,7 @@ DEFAULTS = {
     "micro_min_savings": ContextPolicy.micro_min_savings,
     "micro_idle_seconds": ContextPolicy.micro_idle_seconds,
     "auto_compact": ContextPolicy.auto,
-    "max_steps": 1000,
+    "max_steps": 100000,
     "process_timeout": 3600,
 }
 
