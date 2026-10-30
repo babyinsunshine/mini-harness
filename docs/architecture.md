@@ -504,7 +504,8 @@ src/mini_harness/
 ├── cli/
 │   ├── main.py          # 创建模型、打开会话、选择运行方式
 │   ├── config.py        # 参数解析与配置恢复
-│   ├── interactive.py   # 输入、审批、会话命令与 Ctrl-C
+│   ├── interactive.py   # InteractiveCLI：输入、审批、轮次调度与 Ctrl-C
+│   ├── commands.py      # 斜杠命令识别、执行与聊天分派
 │   ├── display.py       # 正文与执行状态展示
 │   └── usage.py         # 单次缓存用量与主会话累计统计
 ├── session.py           # 会话锁、SQLite、JSONL、输出文件
@@ -535,6 +536,11 @@ Auto 与 `/compact` 复用同一个 `summarize()`；关键函数附有简短中�
 CLI 将模型正文输出到 stdout，模型请求、工具开始/结果、后台完成、压缩和修复状态输出到 stderr。
 预览只展示少量行，完整结果按提示查文件或继续读取。`Harness.events(user_input)` 提供这些事件；
 `Harness.stream(user_input)` 保留只产生模型正文的接口。旧 `create_agent` 会话的消息检查点可以继续恢复。
+
+`run_interactive()` 是薄入口，创建一个 `InteractiveCLI` 实例持有输入队列、当前轮次、审批和暂停状态。
+`run()` 只协调活动分派；空闲等待、执行轮次、审批交互与退出清理分别放在命名明确的方法中。
+只有一个线程读取 stdin，到达时间戳用于区分提前输入的聊天和审批回答；临时后台通知监听在退出时释放，
+已经取出的通知放回队列，仍由图收集，不会因终端监听取消而丢失。
 `model_end` 事件包含耗时、API usage 和结束原因，也写入会话记录；CLI 显示这些信息。
 每次请求显示缓存命中率，例如 `cache 80.0% (560/700)`，表示输入的 700 个 token 中有 560 个命中缓存。
 `/stats` 从当前会话的 `transcript.jsonl` 汇总已记录的主请求，恢复会话后继续累计；
