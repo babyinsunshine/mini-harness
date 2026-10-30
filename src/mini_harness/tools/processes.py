@@ -114,7 +114,7 @@ class ProcessManager:
                     argv = self.session.sandbox.command(
                         argv, env_file=self.env_file, cwd_file=cwd_file,
                     )
-                process = await asyncio.create_subprocess_exec(
+                creation = asyncio.create_task(asyncio.create_subprocess_exec(
                     *map(str, argv),
                     cwd=self.session.cwd,
                     env=self.environment,
@@ -122,13 +122,23 @@ class ProcessManager:
                     stdout=output_stream,
                     stderr=asyncio.subprocess.STDOUT,
                     start_new_session=True,
-                )
+                ))
+                interrupted = False
+                # 创建时也持有进程所有权；拿到句柄并登记后，才能清理整个进程组。
+                while not creation.done():
+                    try:
+                        await asyncio.shield(creation)
+                    except asyncio.CancelledError:
+                        interrupted = True
+                process = creation.result()
             task = ProcessTask(task_id, process, output_path, cwd_file, command)
             self.tasks[task_id] = task
-            task.background = run_in_background
+            task.background = run_in_background and not interrupted
             task.watch_task = asyncio.create_task(self._watch_process(task))
-            if not run_in_background:
+            if not run_in_background or interrupted:
                 try:
+                    if interrupted:
+                        raise asyncio.CancelledError
                     await asyncio.wait_for(asyncio.shield(task.watch_task), timeout)
                 except TimeoutError:
                     task.background = True

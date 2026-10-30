@@ -15,9 +15,19 @@ from .display import display_events
 from .usage import format_session_usage
 
 
+def command_name(user_input):
+    """只识别已有终端命令；以 / 开头的文件路径等仍然是聊天。"""
+    if user_input in {"/tasks", "/stats", "/sessions", "/help"}:
+        return user_input
+    if user_input == "/compact" or user_input.startswith("/compact "):
+        return "/compact"
+    return None
+
+
 async def handle_input(harness, user_input, sessions_dir):
     """处理斜杠命令或聊天输入；sessions_dir 是所有会话的存放目录。"""
-    if user_input == "/tasks":
+    command = command_name(user_input)
+    if command == "/tasks":
         for task in harness.processes.tasks.values():
             print(json.dumps(harness.processes.describe_task(task), ensure_ascii=False))
         if harness.subagents is not None:
@@ -25,13 +35,13 @@ async def handle_input(harness, user_input, sessions_dir):
                 print(json.dumps({key: agent[key] for key in (
                     "agent_id", "status", "session_dir"
                 )}, ensure_ascii=False))
-    elif user_input == "/stats":
+    elif command == "/stats":
         print(format_session_usage(harness.session))
-    elif user_input == "/sessions":
+    elif command == "/sessions":
         print("\n".join(list_sessions(sessions_dir)))
-    elif user_input == "/help":
+    elif command == "/help":
         print("/compact [--from N --to M] [focus]  /tasks  /stats  /sessions  /exit")
-    elif user_input == "/compact" or user_input.startswith("/compact "):
+    elif command == "/compact":
         options = argparse.ArgumentParser(add_help=False, exit_on_error=False)
         options.add_argument("--from", dest="start_group", type=int)
         options.add_argument("--to", dest="end_group", type=int)
@@ -170,6 +180,13 @@ async def run_interactive(harness, sessions_dir):
                 if exiting or agent_task.done():
                     break
             await agent_task
+        except asyncio.CancelledError:
+            # Task 可能尚未进入 Harness；只清理仍在运行的子任务，避免重复收尾。
+            if harness.subagents is not None and any(
+                not task.done() for task in harness.subagents.tasks.values()
+            ):
+                await harness.subagents.interrupt()
+            raise
         finally:
             if not agent_task.done():
                 agent_task.cancel()
@@ -217,7 +234,7 @@ async def run_interactive(harness, sessions_dir):
                 break
             if user_input is not None and not user_input.strip():
                 continue
-            if user_input is not None and not user_input.strip().startswith("/"):
+            if user_input is not None and command_name(user_input.strip()) is None:
                 paused = False
             turn_coroutine = (
                 display_events(harness, None) if user_input is None

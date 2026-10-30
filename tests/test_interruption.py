@@ -82,7 +82,10 @@ async def test_canceling_wait_preserves_background_process_and_saves_result(tmp_
         assert snapshot.next == ()
 
 
-async def test_cli_pauses_background_requests_until_new_chat(tmp_path, monkeypatch):
+@pytest.mark.parametrize("new_message", [
+    "Continue with another approach", "/tmp/example.py is the file to inspect",
+])
+async def test_cli_pauses_background_requests_until_new_chat(tmp_path, monkeypatch, new_message):
     entered, resumed = asyncio.Event(), asyncio.Event()
 
     async def reply(child, messages):
@@ -105,13 +108,124 @@ async def test_cli_pauses_background_requests_until_new_chat(tmp_path, monkeypat
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(resumed.wait(), 0.15)
         assert not harness.processes.completion_events.empty()
-        terminal.answers.put("Continue with another approach")
+        terminal.answers.put(new_message)
         assert await terminal.prompt() == "> "
         assert resumed.is_set()
         latest = model.seen[-1][1]
-        assert any(m.content == "Continue with another approach" for m in latest)
+        assert any(m.content == new_message for m in latest)
         assert any(isinstance(m, HumanMessage) and background["task_id"] in str(m.content)
                    for m in latest)
+        next_background = await harness.processes.run("printf next", run_in_background=True)
+        await harness.processes.tasks[next_background["task_id"]].watch_task
+        await wait_until(lambda: len(model.seen) == 3)
+        assert await terminal.prompt() == "> "
+        terminal.answers.put("/exit")
+        await asyncio.wait_for(running, 5)
+
+
+async def test_cancel_during_subprocess_startup_keeps_ownership_and_cleans_group(
+    tmp_path, monkeypatch,
+):
+    entered, release = asyncio.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    original = loop.connect_write_pipe
+    child_pid = None
+
+    async def gated_pipe(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return result
+
+    def alive(pid):
+        stat = Path(f"/proc/{pid}/stat")
+        return stat.exists() and stat.read_text().split()[2] != "Z"
+
+    async with Harness.open(tmp_path, tmp_path / "session", ScriptedModel()) as harness:
+        monkeypatch.setattr(loop, "connect_write_pipe", gated_pipe)
+        running = asyncio.create_task(harness.processes.run(
+            "echo $$ > shell.pid; sleep 60 & echo $! > child.pid; wait",
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await wait_until(lambda: (tmp_path / "child.pid").exists())
+            child_pid = int((tmp_path / "child.pid").read_text())
+            running.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+            assert not alive(child_pid), "Subprocess child survived startup cancellation"
+            records = harness.session.get("processes")
+            assert len(records) == 1
+            record = next(iter(records.values()))
+            assert record["reason"] == "interrupted" and record["exit_code"] is not None
+        finally:
+            release.set()
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+            if child_pid is not None and alive(child_pid):
+                try:
+                    os.killpg(int((tmp_path / "shell.pid").read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+async def test_early_parent_cancellation_stops_resumed_child(tmp_path):
+    first, resumed, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def reply(child, messages):
+        if child and not any(isinstance(m, ToolMessage) for m in messages):
+            if not first.is_set():
+                first.set()
+                await asyncio.Event().wait()
+            resumed.set()
+            await release.wait()
+            return call("write_file", {"path": "late.txt", "content": "no"}, "late")
+        return AIMessage(content="Done")
+
+    async with Harness.open(tmp_path, tmp_path / "session", AgentModel(handler=reply)) as harness:
+        agent = harness.subagents.spawn("Wait, then write")
+        await asyncio.wait_for(first.wait(), 5)
+        await harness.subagents.interrupt()
+        async with harness.graph.checkpointer.lock:
+            running = asyncio.create_task(consume(harness, "Continue the parent"))
+            await asyncio.wait_for(resumed.wait(), 5)
+            running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        release.set()
+        child = await harness.subagents.wait(agent["agent_id"])
+        assert child["status"] == "interrupted"
+        assert not (tmp_path / "late.txt").exists()
+
+
+async def test_cli_cancel_before_turn_entry_stops_existing_child(tmp_path, monkeypatch):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def reply(child, messages):
+        if child:
+            started.set()
+            await release.wait()
+        return AIMessage(content="Done")
+
+    async with cli_session(tmp_path, monkeypatch, AgentModel(handler=reply)) as (
+        harness, terminal, running,
+    ):
+        agent = harness.subagents.spawn("Wait for another instruction")
+        await asyncio.wait_for(started.wait(), 5)
+        original = asyncio.create_task
+
+        def cancel_before_entry(coroutine, *args, **kwargs):
+            task = original(coroutine, *args, **kwargs)
+            if coroutine.cr_code.co_name == "handle_input":
+                task.cancel()  # Ctrl-C 到达时，这个 Task 还没进入 Harness.events。
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", cancel_before_entry)
+        terminal.answers.put("Start another parent turn")
+        assert await terminal.prompt() == "> "
+        assert harness.subagents.agents[agent["agent_id"]]["status"] == "interrupted"
+        assert harness.subagents.tasks[agent["agent_id"]].done()
         terminal.answers.put("/exit")
         await asyncio.wait_for(running, 5)
 
