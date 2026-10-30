@@ -426,6 +426,48 @@ async def test_reactive_retry_failure_keeps_original_context(tmp_path):
         assert not model.inputs
 
 
+async def test_reactive_can_recover_by_removing_only_obsolete_runtime(tmp_path):
+    with Session(tmp_path / "s", tmp_path) as session:
+        context = ContextManager(session, SummaryModel(), policy())
+        messages = await context.prepare_messages([
+            HumanMessage(content="[Runtime context]\n" + "old " * 4000, id="runtime-obsolete"),
+            HumanMessage(content="Keep the latest request", id="user-latest"),
+        ])
+        attempts = []
+
+        async def invoke_model(request):
+            attempts.append(request)
+            if len(attempts) == 1:
+                raise RuntimeError("prompt_too_long")
+            return AIMessage(content="Recovered")
+
+        reply, retained = await context.request_model(messages, invoke_model)
+        assert reply.content == "Recovered" and len(attempts) == 2
+        assert not any(message.id == "runtime-obsolete" for message in retained)
+        assert any(message.id == "user-latest" for message in retained)
+        assert estimate_tokens(retained) < estimate_tokens(messages) / 2
+
+
+async def test_reactive_does_not_retry_when_rebuilt_runtime_makes_request_larger(tmp_path):
+    with Session(tmp_path / "s", tmp_path) as session:
+        context = ContextManager(session, SummaryModel(), policy())
+        messages = tool_history(counts=(1, 1, 2))
+        messages[2].content = "old output " + "x" * 12000
+        messages = await context.prepare_messages(messages)
+        attempts = []
+
+        async def invoke_model(request):
+            attempts.append(request)
+            if len(attempts) == 1:
+                (tmp_path / "AGENTS.md").write_text("Updated project rules. " + "x" * 24000)
+                raise RuntimeError("prompt_too_long")
+            return AIMessage(content="Should not retry a larger request")
+
+        with pytest.raises(ValueError, match="cannot be reduced"):
+            await context.request_model(messages, invoke_model)
+        assert len(attempts) == 1
+
+
 async def test_reactive_stops_if_only_latest_request_and_protected_context_remain(tmp_path):
     with Session(tmp_path / "s", tmp_path) as session:
         model = SummaryModel(error=AssertionError("Reactive must not call the summarizer"))

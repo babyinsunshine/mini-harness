@@ -249,9 +249,10 @@ def is_user_message(message: AnyMessage) -> bool:
 
 
 def reactive_compact(
-    messages: list[AnyMessage], session: Session, policy: ContextPolicy, overhead: int = 0
+    messages: list[AnyMessage], session: Session, policy: ContextPolicy, overhead: int = 0,
+    *, before_tokens: int | None = None,
 ) -> list[AnyMessage]:
-    """Reactive：从头删除完整组，只保护最新用户请求与最后工具组，目标减半。"""
+    """Reactive：从头删组，只保护最新请求和最后工具组，以失败请求的估算量减半为目标。"""
     groups = group_messages(messages)
     latest_user = next(
         (message for message in reversed(messages) if is_user_message(message)), None,
@@ -268,9 +269,10 @@ def reactive_compact(
         ),
         id=str(uuid4()),
     )
-    before = estimate_tokens(messages) + overhead
+    input_tokens = estimate_tokens(messages) + overhead
+    before = input_tokens if before_tokens is None else before_tokens
     target = min(policy.block_limit, before // 2)
-    remaining = before + estimate_tokens([notice])
+    remaining = input_tokens + estimate_tokens([notice])
     kept = []
     for group in groups:
         protected = group is latest_tools or any(message is latest_user for message in group)
