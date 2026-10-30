@@ -2,7 +2,13 @@
 
 import json
 
-from langchain_core.messages import AIMessage, AIMessageChunk, message_chunk_to_message
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    ToolMessage,
+    message_chunk_to_message,
+)
 
 
 def format_error(error: Exception) -> str:
@@ -14,13 +20,38 @@ def format_error(error: Exception) -> str:
     return " <- ".join(parts)
 
 
+def model_messages(messages):
+    """图片在整组工具结果之后发送；兼容只接受 user 图片的接口，不修改图历史。"""
+    result, attachments = [], []
+    for message in messages:
+        if not isinstance(message, ToolMessage) and attachments:
+            result.append(HumanMessage(content=attachments))
+            attachments = []
+        if isinstance(message, ToolMessage) and isinstance(message.content, list):
+            images = [block for block in message.content
+                      if isinstance(block, dict) and block.get("type") == "image"]
+            if images:
+                attachments.extend([
+                    {"type": "text", "text": f"[Image from tool call: {message.tool_call_id}]"},
+                    *images,
+                ])
+                content = [block for block in message.content if block not in images]
+                message = message.model_copy(
+                    update={"content": content or "[Image attached below]"}
+                )
+        result.append(message)
+    if attachments:
+        result.append(HumanMessage(content=attachments))
+    return result
+
+
 async def request_model_reply(model, messages) -> AIMessage:
     """发起模型请求，接收流式输出并合并成完整回复。
 
     messages 是本次请求的消息列表；原始工具参数保留下来供后续严格校验。
     """
     reply = None
-    async for chunk in model.astream(messages):
+    async for chunk in model.astream(model_messages(messages)):
         reply = chunk if reply is None else reply + chunk
     if isinstance(reply, AIMessageChunk):
         raw_arguments = [tool_call["args"] for tool_call in reply.tool_call_chunks]

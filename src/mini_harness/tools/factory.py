@@ -5,6 +5,7 @@ from langchain_core.tools import tool
 from ..session import Session
 from .agents import create_agent_tools
 from .files import edit_file, read_file, write_file
+from .images import read_image
 from .mcp import create_mcp_tools
 from .plan import PlanStep, update_plan
 from .skills import list_skills, load_skill
@@ -49,6 +50,15 @@ def create_tools(
         page = read_file(session, path, offset, limit)
         output = page.pop("output")
         return {**session.prepare_tool_output(output), **page}
+
+    @tool("read_image")
+    async def read_image_tool(path: str) -> list[dict]:
+        """View a local PNG/JPEG image, at most 5 MiB, using a vision-capable model.
+
+        Accepts absolute paths or paths relative to cwd, including saved MCP screenshots.
+        Keeps an original snapshot in artifacts; use its path to re-read an old image.
+        """
+        return read_image(session, path)
 
     @tool("write_file")
     async def write_file_tool(path: str, content: str) -> str:
@@ -106,8 +116,8 @@ def create_tools(
         return await processes.stop_task(task_id)
 
     tools = [
-        bash, read_file_tool, write_file_tool, edit_file_tool, send_input, stop_task,
-        list_skills_tool, load_skill_tool,
+        bash, read_file_tool, read_image_tool, write_file_tool, edit_file_tool,
+        send_input, stop_task, list_skills_tool, load_skill_tool,
     ]
     if include_plan:
         tools.append(update_plan_tool)
