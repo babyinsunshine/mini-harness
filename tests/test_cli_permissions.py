@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from test_agent_cli import ScriptedModel, call
 
 from mini_harness.agent import Harness
-from mini_harness.cli.interactive import run_interactive
+from mini_harness.cli.interactive import InteractiveCLI, run_interactive
 
 
 class Terminal:
@@ -93,6 +93,35 @@ async def test_canceling_idle_cli_leaves_background_notifications_available(
             await harness.processes.tasks[task["task_id"]].watch_task
         event = await asyncio.wait_for(harness.processes.completion_events.get(), 0.5)
         assert event["task_id"] == task["task_id"]
+
+
+async def test_cancellation_after_completion_does_not_skip_notification_requeue(
+    tmp_path, monkeypatch,
+):
+    async with Harness.open(tmp_path, tmp_path / "session", ScriptedModel()) as harness:
+        cli = InteractiveCLI(harness, tmp_path)
+        cli.input_task = asyncio.create_task(cli.input_queue.get())
+        cli.approval_task = asyncio.create_task(cli.approval_queue.get())
+        original = asyncio.wait
+        waiting = None
+
+        async def cancel_after_waking(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            asyncio.get_running_loop().call_soon(waiting.cancel)
+            return result
+
+        monkeypatch.setattr(asyncio, "wait", cancel_after_waking)
+        event = {"task_id": "completed", "status": "exited", "exit_code": 0}
+        harness.processes.completion_events.put_nowait(event)
+        waiting = asyncio.create_task(cli.wait_for_activity())
+        try:
+            await asyncio.gather(waiting, return_exceptions=True)
+            retained = await asyncio.wait_for(harness.processes.completion_events.get(), 0.5)
+            assert retained == event
+        finally:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+            await cli.close()
 
 
 @pytest.mark.parametrize("answer, exists", [("y", True), ("yes", True), ("n", False), ("", False)])

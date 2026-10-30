@@ -99,9 +99,11 @@ class InteractiveCLI:
             return "background", None
         finally:
             if completion_task is not None:
-                completion_task.cancel()
-                await asyncio.gather(completion_task, return_exceptions=True)
-                # 这里只唤醒主循环，通知内容仍由图收集；取消与完成同时发生也不能丢消息。
+                # 已完成的读取同步回队；多一次 await 就可能被取消，丢掉已取出的通知。
+                if not completion_task.done():
+                    completion_task.cancel()
+                    await asyncio.gather(completion_task, return_exceptions=True)
+                # 这里只唤醒主循环，通知内容仍由图收集。
                 if not completion_task.cancelled():
                     self.harness.processes.completion_events.put_nowait(completion_task.result())
 
