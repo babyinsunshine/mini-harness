@@ -35,4 +35,4 @@
 - [x] **Step 2:** 运行 `uv run --no-sync pytest -q tests/test_checkpoints.py`，Expected: 因旧历史仍被保留而失败。
 - [x] **Step 3:** 实现连接封装、原子清理触发器和旧历史整理；agent.py 只替换连接入口，补充机制说明。
 - [x] **Step 4:** 运行上述回归及 tests/test_agent_cli.py、tests/test_interruption.py、tests/test_images.py、tests/test_subagents.py，Expected: 全部通过。
-- [ ] **Step 5:** `uv run --no-sync ruff check .`、`uv run --no-sync pytest -q`、`git diff --check`，Expected: 全部通过；提交本任务。
+- [x] **Step 5:** `uv run --no-sync ruff check .`、`uv run --no-sync pytest -q`、`git diff --check`，Expected: 全部通过；提交本任务。
