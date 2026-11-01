@@ -1,16 +1,19 @@
 """真实 MCP 子进程与图；只替代外部模型。"""
 
 import asyncio
+import base64
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from test_agent_cli import ScriptedModel, call, consume
+from test_images import PNG
 from test_subagents import AgentModel
 
 from mini_harness.agent import Harness
@@ -65,6 +68,20 @@ def payload(kind: str) -> list:
         return [TextContent(type="text", text="x" * 20000)]
     return [ImageContent(type="image", data=base64.b64encode(b"image-fixture").decode(),
                          mime_type="image/png")]
+
+@server.tool()
+def visual(long_text: bool = False) -> CallToolResult:
+    """Return a screenshot, text and extra structured fields together."""
+    return CallToolResult(content=[
+        TextContent(type="text", text="Screenshot ready" + ("x" * 20000 if long_text else "")),
+        ImageContent(type="image", mime_type="image/png", data=
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC"),
+    ], structured_content={"width": 1})
+
+def verbose(label: str) -> str:
+    return label
+verbose.__doc__ = "A tool with detailed instructions. " + "detail " * 3000 + "END OF INSTRUCTIONS"
+server.tool()(verbose)
 
 @server.tool()
 async def slow() -> str:
@@ -205,6 +222,26 @@ async def test_mcp_catalog_does_not_require_approval(mcp_project):
     assert result.status == "success" and "increment" in result.text
 
 
+async def test_mcp_catalog_stays_small_and_full_schema_is_available_on_demand(mcp_project):
+    model = ScriptedModel(responses=[
+        call("list_mcp_tools", {"server": "local"}, "catalog"),
+        call("list_mcp_tools", {"server": "local", "tool_name": "verbose"}, "schema"),
+        AIMessage(content="Discovered"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=mcp_project / ".mcp.json") as harness:
+        await consume(harness, "Discover the server's tools")
+    results = {m.tool_call_id: json.loads(m.text)
+               for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    catalog = json.loads(results["catalog"]["output"])
+    assert {item["name"] for item in catalog} >= {"increment", "visual", "verbose"}
+    assert all("input_schema" not in item for item in catalog)
+    schema = json.loads(Path(results["schema"]["output_path"]).read_text())[0]
+    assert schema["name"] == "verbose"
+    assert schema["description"].endswith("END OF INSTRUCTIONS")
+    assert schema["input_schema"]["required"] == ["label"]
+
+
 async def test_child_reuses_parent_mcp_and_leaves_connection_open(mcp_project):
     def reply(child, messages):
         label = "child" if child else (
@@ -229,8 +266,6 @@ async def test_child_reuses_parent_mcp_and_leaves_connection_open(mcp_project):
 
 
 async def test_mcp_large_text_and_images_are_saved_as_artifacts(mcp_project):
-    from pathlib import Path
-
     model = ScriptedModel(responses=[
         *[call("call_mcp_tool", {
             "server": "local", "tool_name": "payload", "arguments": {"kind": kind},
@@ -248,6 +283,42 @@ async def test_mcp_large_text_and_images_are_saved_as_artifacts(mcp_project):
         image = next(harness.session.artifacts.glob("*.png"))
         assert image.read_bytes() == b"image-fixture"
         assert str(image) in results["image"]["output"]
+        assert not any(isinstance(m, HumanMessage) and isinstance(m.content, list)
+                       for m in model.seen[-1])
+
+
+@pytest.mark.parametrize("long_text", [False, True])
+async def test_mcp_inline_images_reach_model_without_losing_text_or_data(mcp_project, long_text):
+    from mini_harness.tools.images import read_image
+
+    model = ScriptedModel(responses=[
+        call("call_mcp_tool", {
+            "server": "local", "tool_name": "visual", "arguments": {"long_text": long_text},
+            "include_images": True,
+        }, "screenshot"),
+        AIMessage(content="Observed"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=mcp_project / ".mcp.json",
+                            full_access=True) as harness:
+        await consume(harness, "Inspect the screenshot")
+        messages = model.seen[-1]
+        images = [block for message in messages
+                  if isinstance(message, HumanMessage) and isinstance(message.content, list)
+                  for block in message.content if block.get("type") == "image"]
+        assert len(images) == 1
+        assert images[0]["mime_type"] == "image/png"
+        assert base64.b64decode(images[0]["base64"]) == PNG
+        result = next(m for m in messages if isinstance(m, ToolMessage))
+        assert result.status == "success"
+        prepared = json.loads(result.text)
+        output = Path(prepared["output_path"]).read_text() if long_text else prepared["output"]
+        assert "Screenshot ready" + ("x" * 20000 if long_text else "") in output
+        assert json.loads(output)["structured_content"] == {"width": 1}
+        saved = next(harness.session.artifacts.glob("*.png"))
+        assert saved.read_bytes() == PNG and str(saved) in output
+        read_image(harness.session, str(saved))
+        assert list(harness.session.artifacts.glob("*.png")) == [saved]
 
 
 async def test_streamable_http_uses_the_same_tool_interface(mcp_project):
