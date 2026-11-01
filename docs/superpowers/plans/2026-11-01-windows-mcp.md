@@ -36,5 +36,18 @@
 - [x] Add minimal adapter change; run MCP and image regressions (GREEN).
 - [x] Reproduce oversized discovery from the first real run; keep server catalogs short and expose full metadata by tool_name. Verify RED then GREEN.
 - [x] Publish generic source-install and WSL startup instructions with the pinned commit, offline cache and targeted warning filters.
-- [ ] Run the real harness against the owned test form and verify the resulting input/click count. Back up and switch the ignored local config after success.
-- [ ] Run pytest, Ruff, diff checks and secret scanning; request one independent review, address findings, create a draft PR stacked on PR17.
+- [x] Run the real harness against the owned test form and verify the resulting input/click count. Back up and switch the ignored local config after success.
+- [x] Run pytest, Ruff, diff checks and secret scanning; request one independent review and address findings.
+
+Publish a draft PR stacked on PR17 after validation; keep the worktree and both PRs unmerged.
+
+
+## Validation
+
+- New image regressions first failed with zero model-visible image blocks; discovery regression first failed because its directory was truncated.
+- Complete suite: **372 passed in 212.65s**. Ruff, CLI help, diff checks and Gitleaks passed.
+- Independent review: no findings; separately ran **30 MCP/image tests in 47.62s**.
+- Two real harness runs completed in 68.59s and 64.33s against an owned Windows test window. Exact Chinese input and one-click increments were verified outside the model.
+- The second run needed no Bash catalog inspection. One USER_CONTROL response recovered through waiting and fresh UI inspection. An initial Snapshot used read_image with the default mode; the final Screenshot returned its image inline without another read.
+- Native source smoke tests verified three input/click rounds, App switch, Snapshot and Screenshot. The owned test window was closed afterward.
+- The ignored local MCP configuration was backed up before switching to the tested source. Personal configuration and test artifacts remain outside commits.
