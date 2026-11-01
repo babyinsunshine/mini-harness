@@ -5,7 +5,6 @@ import inspect
 import json
 import os
 import signal
-import sqlite3
 from typing import Any
 
 import pytest
@@ -183,6 +182,7 @@ async def test_timeout_kills_child_processes_and_continue_gets_a_new_deadline(tm
 
 async def test_interrupted_child_commits_checkpoint_before_session_closes(tmp_path, monkeypatch):
     from aiosqlite import Cursor
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     started = asyncio.Event()
     execute = Cursor.executemany
@@ -207,10 +207,12 @@ async def test_interrupted_child_commits_checkpoint_before_session_closes(tmp_pa
         await asyncio.wait_for(started.wait(), 5)
         await parent.subagents.interrupt()
         directory = parent.session.directory / "subagents" / agent["agent_id"]
-        with sqlite3.connect(directory / "state.sqlite") as database:
-            assert database.execute(
-                "SELECT count(*) FROM writes WHERE channel='__error__'"
-            ).fetchone()[0] == 1
+        # 取消结果已合入最新状态；旧检查点的 __error__ 写入可以被清理。
+        async with AsyncSqliteSaver.from_conn_string(str(directory / "state.sqlite")) as saver:
+            saved = await saver.aget_tuple({"configurable": {"thread_id": agent["agent_id"]}})
+            state = saved.checkpoint["channel_values"]
+            assert state["next"] == "end" and state["pending_calls"] == []
+            assert any(m.content == "Start" for m in state["messages"])
         parent.subagents.continue_agent(agent["agent_id"], "Continue", timeout=5)
         result = await parent.subagents.wait(agent["agent_id"])
         assert result["status"] == "waiting" and result["result"] == "continued"

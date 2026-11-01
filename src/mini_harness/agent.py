@@ -14,9 +14,9 @@ from langchain_core.messages import (
     ToolMessage,
     messages_from_dict,
 )
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from .checkpoints import open_checkpointer
 from .context.compact import estimate_tokens
 from .context.manager import ContextManager
 from .context.policy import ContextPolicy
@@ -114,7 +114,7 @@ class Harness:
             )
             async with (
                 ProcessManager(session, max_runtime_seconds=process_timeout) as processes,
-                AsyncSqliteSaver.from_conn_string(str(session.database)) as checkpointer,
+                open_checkpointer(session.database) as checkpointer,
                 connect_mcp(config_path, parent_mcp) as mcp_clients,
             ):
                 harness = cls(
