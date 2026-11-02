@@ -293,10 +293,16 @@ stdio 的 `cwd` 缺省为配置文件所在目录，相对 `cwd` 也以该目录
 | --- | --- |
 | `list_mcp_tools()` | 列出已配置的服务器名称 |
 | `list_mcp_tools(server)` | 查看工具名称和简短描述 |
-| `list_mcp_tools(server, tool_name)` | 查看指定工具的完整描述和参数 schema |
+| `list_mcp_tools(server, tool_names=[...])` | 批量查看指定工具的完整描述和参数 schema |
 | `call_mcp_tool(server, tool_name, arguments, include_images=False)` | 调用选中的工具，可选择直接返回图片 |
 
 发现工具直接允许；实际调用沿用现有审批，`--full-access` 下直接允许。
+查询单个工具也传一个元素的 `tool_names` 列表，替代原来的 `tool_name` 查询参数；
+`call_mcp_tool` 的 `tool_name` 仍是单个名称。空列表返回空结果，未知名称报错。
+完整目录在当前工具集合中按服务器缓存在内存，不注入系统提示；恢复会话时重新获取。
+调用前按服务器的 `input_schema` 校验参数，不修改或补齐参数。
+校验失败时返回错误字段与对应 schema，并明确此次工具未执行；长反馈保存到 `output_path`。
+校验通过后只调用一次；执行错误、超时和取消仍由原有流程反馈，不自动重试。
 文本与结构化结果进入工具消息，超长结果复用 `artifacts/` 落盘。
 图片和音频始终保存为文件并返回路径。视觉模型可设置 `include_images=True`，
 在同一次工具结果中接收标准图片块，省去额外的 `read_image` 调用；音频仍只返回路径。

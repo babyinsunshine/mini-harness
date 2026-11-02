@@ -45,8 +45,14 @@ uv run --extra mcp mini-harness --mcp-config .mini-harness/mcp.windows.json
 
 ## 模型怎样操作
 
-先用 `list_mcp_tools(server="windows")` 看名称和简短描述，再指定 `tool_name` 查看
-所需工具的完整说明和实际 schema，避免把整份目录塞进上下文。
+先用 `list_mcp_tools(server="windows")` 看名称和简短描述，再批量读取本次需要的工具：
+
+```python
+list_mcp_tools(server="windows", tool_names=["Type", "Wait", "Scroll", "Screenshot"])
+```
+
+单个工具也传一个元素的列表。参数在发送前按 schema 校验，错误反馈附对应说明，
+模型可以直接修正；例如 `Wait` 使用 `duration`，不能写成 `seconds`。
 视觉模型调用截图时可以直接带回图片：
 
 ```json
