@@ -35,5 +35,17 @@
 - [x] Add real protocol request recording to the MCP fixture. Write tests for ordered batch schemas, empty/unknown names, cache reuse/isolation/reopen, local validation and one-time corrected execution, long errors and unchanged runtime failures.
 - [x] Run new tests against current code; confirm failures reflect missing batch discovery and local validation.
 - [x] Add minimal catalog helper and lazy jsonschema import/validation; declare jsonschema>=4.20,<5 in the MCP extra and update lock offline. Migrate singular discovery calls and docs.
-- [ ] Run MCP/image/CLI regressions, then pytest, Ruff, locked dependency checks, CLI help and secret scan. Commit the tested change.
-- [ ] Obtain one read-only independent review, address findings, update PR18 and verify CI. Keep both PRs unmerged and preserve the worktree.
+- [x] Run MCP/image/CLI regressions, then pytest, Ruff, locked dependency checks, CLI help and secret scan. Commit the tested change.
+- [x] Obtain one read-only independent review and address findings.
+
+Publish to existing PR18 and verify CI after validation; keep both PRs unmerged and preserve the worktree.
+
+
+## Validation
+
+- Seven new regression cases first failed against the original implementation (five core cases and two cache lifecycle cases).
+- MCP suite: **25 passed in 74.05s**. Complete suite: **379 passed in 216.35s**.
+- Independent review: no findings; independently reran **3 rejection/correction and runtime-error tests in 5.15s**.
+- Real default-model + Windows MCP test: **19.8s, four model requests**. One Wait/Scroll batch, local rejection of Wait(seconds=0), successful Wait(duration=0), no schema requery and no other desktop actions.
+- A separate offline base-only installation contained neither fastmcp nor jsonschema and passed CLI help.
+- Ruff, CLI help, locked dependency verification, diff checks and Gitleaks passed. No dependency versions were upgraded.
