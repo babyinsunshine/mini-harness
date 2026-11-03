@@ -32,5 +32,16 @@
 
 - [x] Add serializer-count/reopen and exact-byte/artifact-reuse tests; run them before code changes (RED).
 - [x] Add early dedup and common saving; remove duplicate hashing/writing and unused imports from image/MCP callers (GREEN).
-- [ ] Run session/image/MCP regressions, full pytest, Ruff, CLI help and secret checks; commit the tested change.
-- [ ] Request one independent read-only review, update PR18 and verify CI; preserve the worktree and leave PRs unmerged.
+- [x] Run session/image/MCP regressions, full pytest, Ruff, CLI help and secret checks; commit the tested change.
+- [x] Request one independent read-only review.
+
+Update PR18 and verify CI after validation; preserve the worktree and leave PRs unmerged.
+
+
+## Validation
+
+- Four regression cases first failed against the original code (repeated serialization and missing binary/suffix support).
+- Related session/image/MCP tests: **55 passed in 46.67s**; full suite: **383 passed in 201.47s**.
+- Independent review: no findings; **10 focused tests passed** independently.
+- Ruff, CLI help, diff checks and Gitleaks passed.
+- No model API or Windows desktop action was needed for this shared-storage refactor. Existing format/size/permission and interruption tests remain in the full suite.
