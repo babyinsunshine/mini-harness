@@ -1,7 +1,6 @@
 """读取 PNG/JPEG，保存原始快照，并返回模型可消费的图片块。"""
 
 import base64
-import hashlib
 
 from ..session import Session
 from .file_guard import access_file
@@ -23,9 +22,7 @@ def read_image(session: Session, path: str) -> list[dict]:
         mime_type, suffix = "image/jpeg", ".jpg"
     else:
         raise ValueError("Only PNG and JPEG images are supported")
-    saved = session.artifacts / (hashlib.sha256(data).hexdigest() + suffix)
-    if not saved.exists():
-        saved.write_bytes(data)
+    saved = session.save_artifact(data, suffix)
     return [
         {"type": "text", "text": f"Image saved to: {saved}\nUse read_image to view it again."},
         {"type": "image", "base64": base64.b64encode(data).decode(), "mime_type": mime_type},

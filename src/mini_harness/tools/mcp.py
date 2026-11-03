@@ -1,7 +1,6 @@
 """连接配置好的 MCP 服务；只向模型提供发现和调用两个入口。"""
 
 import base64
-import hashlib
 import json
 import mimetypes
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -109,10 +108,7 @@ def create_mcp_tools(session, clients):
             elif block.type in {"image", "audio"}:
                 suffix = mimetypes.guess_extension(block.mime_type) or ".bin"
                 data = base64.b64decode(block.data)
-                # 与 read_image 共用原始字节哈希，重新查看同一截图不再复制文件。
-                path = session.artifacts / (hashlib.sha256(data).hexdigest() + suffix)
-                if not path.exists():
-                    path.write_bytes(data)
+                path = session.save_artifact(data, suffix)
                 parts.append(f"MCP {block.type} saved to: {path}")
                 if block.type == "image" and include_images:
                     images.append({"type": "image", "base64": block.data,
