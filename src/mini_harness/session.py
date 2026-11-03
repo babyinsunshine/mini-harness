@@ -114,18 +114,24 @@ class Session:
         self._recorded_event_ids.add(event_id)
 
     def record_message(self, message: BaseMessage):
+        """历史可能被多次补记；先按 ID 去重，避免重复序列化。"""
         if message.id is None:
             message.id = str(uuid4())
+        if message.id in self._recorded_event_ids:
+            return
         self.record("message", event_id=message.id, message=message_to_dict(message))
 
-    def artifact_path(self, text: str) -> Path:
-        digest = hashlib.sha256(text.encode()).hexdigest()
-        return self.artifacts / f"{digest}.txt"
+    def artifact_path(self, content: str | bytes, suffix: str = ".txt") -> Path:
+        data = content.encode("utf-8") if isinstance(content, str) else content
+        digest = hashlib.sha256(data).hexdigest()
+        return self.artifacts / f"{digest}{suffix}"
 
-    def save_artifact(self, text: str) -> Path:
-        path = self.artifact_path(text)
+    def save_artifact(self, content: str | bytes, suffix: str = ".txt") -> Path:
+        """文本和附件按原始字节共用哈希路径；已有文件直接复用。"""
+        data = content.encode("utf-8") if isinstance(content, str) else content
+        path = self.artifact_path(data, suffix)
         if not path.exists():
-            path.write_text(text, encoding="utf-8", newline="")
+            path.write_bytes(data)
         return path
 
     def prepare_tool_output(self, output: str, max_chars: int = 12000) -> dict:

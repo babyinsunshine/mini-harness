@@ -292,12 +292,21 @@ stdio 的 `cwd` 缺省为配置文件所在目录，相对 `cwd` 也以该目录
 | 工具 | 用途 |
 | --- | --- |
 | `list_mcp_tools()` | 列出已配置的服务器名称 |
-| `list_mcp_tools(server, tool_name=None)` | 查看工具描述和参数 schema，可按工具名筛选 |
-| `call_mcp_tool(server, tool_name, arguments)` | 调用选中的工具 |
+| `list_mcp_tools(server)` | 查看工具名称和简短描述 |
+| `list_mcp_tools(server, tool_names=[...])` | 批量查看指定工具的完整描述和参数 schema |
+| `call_mcp_tool(server, tool_name, arguments, include_images=False)` | 调用选中的工具，可选择直接返回图片 |
 
 发现工具直接允许；实际调用沿用现有审批，`--full-access` 下直接允许。
+查询单个工具也传一个元素的 `tool_names` 列表，替代原来的 `tool_name` 查询参数；
+`call_mcp_tool` 的 `tool_name` 仍是单个名称。空列表返回空结果，未知名称报错。
+完整目录在当前工具集合中按服务器缓存在内存，不注入系统提示；恢复会话时重新获取。
+调用前按服务器的 `input_schema` 校验参数，不修改或补齐参数。
+校验失败时返回错误字段与对应 schema，并明确此次工具未执行；长反馈保存到 `output_path`。
+校验通过后只调用一次；执行错误、超时和取消仍由原有流程反馈，不自动重试。
 文本与结构化结果进入工具消息，超长结果复用 `artifacts/` 落盘。
-图片和音频保存为文件并返回路径，当前不作为多模态内容发给模型。
+图片和音频始终保存为文件并返回路径。视觉模型可设置 `include_images=True`，
+在同一次工具结果中接收标准图片块，省去额外的 `read_image` 调用；音频仍只返回路径。
+默认关闭图片返回，兼容文本模型。图片文件按原始字节哈希命名，与 `read_image` 复用。
 
 支持 stdio 与 Streamable HTTP。例如连接已经启动的 HTTP MCP 服务：
 
@@ -315,12 +324,10 @@ HTTP 可在同一配置项中添加 `headers`，例如服务要求的 Authorizat
 `.mcp.json` 默认被 Git 忽略，实际密钥留在本地配置中。
 
 [Windows-MCP](https://github.com/CursorTouch/Windows-MCP) 必须运行在 Windows 侧。
-当前版本需要 Python 3.14+，可在 Windows PowerShell 中用 `uvx --python 3.14 windows-mcp --help`
-先准备环境；通过 `Get-Command uvx` 确认可执行文件路径，再修改
-[`examples/mcp.windows-wsl.json`](../examples/mcp.windows-wsl.json) 并作为 `--mcp-config` 传入。
-这个示例通过 Windows PowerShell 启动服务器，harness 继续运行在 WSL 中。
-启动配置定向忽略 MCP 日志接口的弃用警告，其他警告和错误照常输出。
-普通文本模型先使用 `Snapshot` 的文本 UI 树；截图返回图片文件，需要视觉能力时另行接入。
+需要 Python 3.14+。示例固定到经过实测的源码提交，使用 `relaxed` 控制策略，
+保留点击和输入的控制保护；联网安装一次后通过本机缓存启动。
+配置及截图用法见 [Windows 启动说明](windows-mcp.md) 和
+[`examples/mcp.windows-wsl.json`](../examples/mcp.windows-wsl.json)。
 
 主会话保持 MCP 连接，子智能体复用父连接；结束子智能体不会关闭共享服务器。
 退出主会话时关闭所有客户端，并结束由本会话启动的 stdio 服务；HTTP 服务由外部管理。
@@ -565,7 +572,7 @@ API 未返回缓存数据的请求不参与该比率，界面会显示数据覆�
 工具返回保存路径和 LangChain 标准图片块，不增加依赖或图节点。
 主请求由 `responses.model_messages()` 把图片放到整组工具结果之后的用户消息，
 保存的工具结果保持完整，恢复会话复用原图快照。需要支持图片输入的模型/API，默认模型不变。
-MCP 截图仍先落盘，模型按需使用 `read_image` 查看。
+MCP 截图默认返回路径；设置 `include_images=True` 可直接查看，仍保存原图供后续读取。
 
 Micro 沿用近期保护与批量阈值，旧图片整块移除并保留文字路径，替换文本固定复用。
 文字摘要不包含图片编码，只保留原图路径和模型之前的观察；不额外生成图片描述。

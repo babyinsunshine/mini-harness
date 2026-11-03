@@ -7,7 +7,7 @@
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "$env:PYTHONWARNINGS='ignore:The logging capability is deprecated as of 2026-07-28'; & 'C:\\Users\\YOUR_USER\\.local\\bin\\uvx.exe' --python 3.14 windows-mcp serve"
+        "$env:UV_OFFLINE='1'; $env:ANONYMIZED_TELEMETRY='false'; $env:PYTHONWARNINGS=\"ignore:The logging capability is deprecated as of 2026-07-28,ignore:'asyncio.WindowsSelectorEventLoopPolicy':DeprecationWarning,ignore:'asyncio.set_event_loop_policy':DeprecationWarning\"; $source=Join-Path $env:LOCALAPPDATA 'mini-harness\\mcp\\Windows-MCP-94b52cfb48076cb793e710351517fa18a316cd12'; & (Join-Path $env:USERPROFILE '.local\\bin\\uvx.exe') --python 3.14 --from $source windows-mcp serve --control-policy relaxed"
       ]
     }
   }

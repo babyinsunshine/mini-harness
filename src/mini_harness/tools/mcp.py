@@ -43,41 +43,76 @@ async def connect_mcp(config_path: Path | None, shared=None):
 
 
 def create_mcp_tools(session, clients):
-    @tool
-    async def list_mcp_tools(server: str | None = None, tool_name: str | None = None) -> dict:
-        """List configured MCP server names, or a server's tools and JSON input schemas.
+    from jsonschema import ValidationError, validate
 
-        Omit server to discover servers first. Supply a server to inspect its tools.
-        Set tool_name to inspect only that tool's schema instead of a large catalog.
-        Long catalogs are saved to output_path; use read_file to inspect them.
+    catalogs = {}
+
+    async def get_catalog(server):
+        """每个服务器按需取一次；缓存随当前工具集合销毁，不写入对话。"""
+        if server not in catalogs:
+            catalogs[server] = {item.name: item for item in await clients[server].list_tools()}
+        return catalogs[server]
+
+    @tool
+    async def list_mcp_tools(
+        server: str | None = None, tool_names: list[str] | None = None,
+    ) -> dict:
+        """Discover MCP servers, tool summaries, or a batch of complete tool schemas.
+
+        Omit server to list servers. Supply server for tool names and short descriptions.
+        Set tool_names to read those tools' full descriptions and JSON input schemas
+        together before calling them. For one tool, pass a one-item list.
+        Long results are saved to output_path; inspect with read_file.
         """
         if server is None:
             return {"servers": list(clients)}
-        catalog = [
-            {"name": item.name, "description": item.description, "input_schema": item.input_schema}
-            for item in await clients[server].list_tools()
-            if tool_name is None or item.name == tool_name
-        ]
+        available = await get_catalog(server)
+        selected = (available.values() if tool_names is None else
+                    [available[name] for name in dict.fromkeys(tool_names)])
+        catalog = []
+        for item in selected:
+            entry = {"name": item.name, "description": (item.description or "")[:200]}
+            if tool_names is not None:
+                entry.update(description=item.description, input_schema=item.input_schema)
+            catalog.append(entry)
         return session.prepare_tool_output(json.dumps(catalog, ensure_ascii=False, indent=2))
 
     @tool
-    async def call_mcp_tool(server: str, tool_name: str, arguments: dict) -> dict:
+    async def call_mcp_tool(
+        server: str, tool_name: str, arguments: dict, include_images: bool = False,
+    ) -> dict | list[dict]:
         """Call a discovered MCP tool with arguments matching its input_schema.
 
         Only configured servers are available. External actions follow permission checks.
-        Long text is saved to output_path. Images/audio are saved as files, not shown to
-        the model; use text/UI-tree output when the model cannot consume images.
+        Arguments are checked against the tool's schema before execution; invalid
+        arguments return the error and schema without sending the action to MCP.
+        Long text is saved to output_path. Images/audio are always saved as files.
+        For vision models, set include_images=True to see screenshots in this result
+        without another read_image call. Text-only models should leave it False.
         """
+        schema = (await get_catalog(server))[tool_name].input_schema
+        try:
+            validate(arguments, schema)
+        except ValidationError as error:
+            feedback = session.prepare_tool_output(json.dumps({
+                "tool": tool_name, "error": error.message, "path": list(error.absolute_path),
+                "input_schema": schema,
+            }, ensure_ascii=False))
+            raise ValueError("Invalid MCP arguments; tool was not executed.\n"
+                             + json.dumps(feedback, ensure_ascii=False)) from None
         result = await clients[server].call_tool(tool_name, arguments)
-        parts = []
+        parts, images = [], []
         for block in result.content:
             if block.type == "text":
                 parts.append(block.text)
             elif block.type in {"image", "audio"}:
                 suffix = mimetypes.guess_extension(block.mime_type) or ".bin"
-                path = session.artifact_path(block.data).with_suffix(suffix)
-                path.write_bytes(base64.b64decode(block.data))
+                data = base64.b64decode(block.data)
+                path = session.save_artifact(data, suffix)
                 parts.append(f"MCP {block.type} saved to: {path}")
+                if block.type == "image" and include_images:
+                    images.append({"type": "image", "base64": block.data,
+                                   "mime_type": block.mime_type})
             else:
                 parts.append(block.model_dump_json(by_alias=True, exclude_none=True))
         output = "\n".join(parts)
@@ -85,6 +120,9 @@ def create_mcp_tools(session, clients):
             # 结构化字段可能包含正文里没有的数据；统一经过长度限制和落盘。
             output = json.dumps({"text": output, "structured_content": result.structured_content},
                                 ensure_ascii=False)
-        return session.prepare_tool_output(output)
+        prepared = session.prepare_tool_output(output)
+        if images:
+            return [{"type": "text", "text": json.dumps(prepared, ensure_ascii=False)}, *images]
+        return prepared
 
     return [list_mcp_tools, call_mcp_tool]

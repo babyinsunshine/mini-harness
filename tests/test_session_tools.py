@@ -1,11 +1,58 @@
 import json
+import os
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, message_to_dict
 
 from mini_harness.session import Session
 from mini_harness.tools.factory import create_tools
 from mini_harness.tools.files import edit_file, read_file, write_file
+
+
+@pytest.mark.parametrize("message_id", [None, "user-1"])
+def test_recorded_messages_are_not_serialized_again_after_reopen(tmp_path, monkeypatch, message_id):
+    converted = []
+
+    def convert(message):
+        converted.append(message.id)
+        return message_to_dict(message)
+
+    monkeypatch.setattr("mini_harness.session.message_to_dict", convert)
+    directory = tmp_path / "session"
+    message = HumanMessage(content="original request", id=message_id)
+    with Session(directory, tmp_path) as session:
+        session.record_message(message)
+        assert message.id is not None
+        session.record_message(message.model_copy())
+    with Session(directory) as session:
+        session.record_message(message)
+    assert converted == [message.id]
+    records = [json.loads(line) for line in session.transcript.read_text().splitlines()]
+    assert len(records) == 1 and records[0]["id"] == message.id
+    assert records[0]["message"]["data"]["content"] == "original request"
+
+
+@pytest.mark.parametrize("content,original,digest", [
+    ("中文\r\n", b"\xe4\xb8\xad\xe6\x96\x87\r\n",
+     "8fe398fcbb297af30d291a24e54ed6f1a879e9b301a4fce5663ab67fd7f65dc5"),
+    (b"\x00\xff\r\n", b"\x00\xff\r\n",
+     "e9489f37fb3051e9efa1dc916004d7274e7b63975e3209708947267f2393a9be"),
+])
+def test_artifact_saving_preserves_bytes_and_reuses_existing_file(
+    tmp_path, content, original, digest,
+):
+    directory = tmp_path / "session"
+    with Session(directory, tmp_path) as session:
+        if isinstance(content, str):
+            assert session.save_artifact(content).name == f"{digest}.txt"
+        saved = session.save_artifact(content, suffix=".bin")
+        assert saved == session.artifacts / f"{digest}.bin"
+        assert saved.read_bytes() == original
+        os.utime(saved, ns=(1_000_000_000, 1_000_000_000))
+        modified_at = saved.stat().st_mtime_ns
+    with Session(directory) as session:
+        assert session.save_artifact(content, suffix=".bin") == saved
+    assert saved.read_bytes() == original and saved.stat().st_mtime_ns == modified_at
 
 
 def test_reopen_retains_cwd_and_deduplicates_history(tmp_path):

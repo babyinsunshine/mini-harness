@@ -1,16 +1,19 @@
 """真实 MCP 子进程与图；只替代外部模型。"""
 
 import asyncio
+import base64
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from test_agent_cli import ScriptedModel, call, consume
+from test_images import PNG
 from test_subagents import AgentModel
 
 from mini_harness.agent import Harness
@@ -27,6 +30,8 @@ import os
 import base64
 import sys
 from pathlib import Path
+from typing import Annotated
+from pydantic import Field
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
@@ -37,6 +42,14 @@ with (root / "starts.txt").open("a") as stream:
     stream.write("x")
 server = MCPServer("fixture")
 count = 0
+
+async def record_requests(context, call_next):
+    if context.method in {"tools/list", "tools/call"}:
+        with (root / "requests.jsonl").open("a") as stream:
+            print(json.dumps({"method": context.method, "params": context.params}), file=stream)
+    return await call_next(context)
+
+server.middleware.append(record_requests)
 
 @server.tool()
 def increment(label: str) -> dict:
@@ -65,6 +78,20 @@ def payload(kind: str) -> list:
         return [TextContent(type="text", text="x" * 20000)]
     return [ImageContent(type="image", data=base64.b64encode(b"image-fixture").decode(),
                          mime_type="image/png")]
+
+@server.tool()
+def visual(long_text: bool = False) -> CallToolResult:
+    """Return a screenshot, text and extra structured fields together."""
+    return CallToolResult(content=[
+        TextContent(type="text", text="Screenshot ready" + ("x" * 20000 if long_text else "")),
+        ImageContent(type="image", mime_type="image/png", data=
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC"),
+    ], structured_content={"width": 1})
+
+def verbose(label: Annotated[str, Field(description="detail " * 3000 + "END OF PARAMETER")]) -> str:
+    return label
+verbose.__doc__ = "A tool with detailed instructions. " + "detail " * 3000 + "END OF INSTRUCTIONS"
+server.tool()(verbose)
 
 @server.tool()
 async def slow() -> str:
@@ -96,6 +123,164 @@ def mcp_call(call_id="increment"):
     }, call_id)
 
 
+def received_requests(project, method):
+    records = [json.loads(line) for line in (project / "requests.jsonl").read_text().splitlines()]
+    return [record["params"] for record in records if record["method"] == method]
+
+
+async def test_mcp_batches_full_schemas_and_reuses_catalog(mcp_project):
+    model = ScriptedModel(responses=[
+        call("list_mcp_tools", {"server": "local"}, "summary"),
+        call("list_mcp_tools", {
+            "server": "local", "tool_names": ["verbose", "increment", "verbose"],
+        }, "batch"),
+        call("list_mcp_tools", {"server": "local", "tool_names": []}, "empty"),
+        AIMessage(content="Discovered"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=mcp_project / ".mcp.json") as harness:
+        await consume(harness, "Inspect these tools together")
+    results = {m.tool_call_id: json.loads(m.text)
+               for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    batch = json.loads(Path(results["batch"]["output_path"]).read_text())
+    assert [item["name"] for item in batch] == ["verbose", "increment"]
+    assert batch[0]["description"].endswith("END OF INSTRUCTIONS")
+    assert batch[0]["input_schema"]["properties"]["label"]["description"].endswith(
+        "END OF PARAMETER"
+    )
+    assert batch[1]["input_schema"]["required"] == ["label"]
+    assert json.loads(results["empty"]["output"]) == []
+    assert len(received_requests(mcp_project, "tools/list")) == 1
+
+
+@pytest.mark.parametrize("arguments", [{}, {"label": 42}])
+async def test_mcp_invalid_arguments_stay_local_and_model_can_correct(mcp_project, arguments):
+    model = ScriptedModel(responses=[
+        call("call_mcp_tool", {
+            "server": "local", "tool_name": "increment", "arguments": arguments,
+        }, "invalid"),
+        call("call_mcp_tool", {
+            "server": "local", "tool_name": "increment", "arguments": {"label": "fixed"},
+        }, "corrected"),
+        AIMessage(content="Corrected"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=mcp_project / ".mcp.json", full_access=True) as harness:
+        await consume(harness, "Call and correct the arguments if needed")
+    results = {m.tool_call_id: m for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    error = results["invalid"]
+    assert error.status == "error" and "not executed" in error.text
+    feedback = json.loads(error.text.split("\n", 1)[1])
+    details = json.loads(feedback["output"])
+    assert details["input_schema"]["properties"]["label"]["type"] == "string"
+    assert "label" in details["error"] or details["path"] == ["label"]
+    assert results["corrected"].status == "success"
+    requests = received_requests(mcp_project, "tools/call")
+    assert [(r["name"], r["arguments"]) for r in requests] == [
+        ("increment", {"label": "fixed"}),
+    ]
+    assert json.loads((mcp_project / "effect.json").read_text())["count"] == 1
+    assert len(received_requests(mcp_project, "tools/list")) == 1
+
+
+async def test_mcp_large_validation_schema_is_saved_without_remote_call(mcp_project):
+    model = ScriptedModel(responses=[
+        call("call_mcp_tool", {
+            "server": "local", "tool_name": "verbose", "arguments": {},
+        }, "invalid"),
+        AIMessage(content="Read the error"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=mcp_project / ".mcp.json", full_access=True) as harness:
+        await consume(harness, "Call with missing parameters")
+    error = next(m for m in model.seen[-1] if isinstance(m, ToolMessage))
+    assert error.status == "error" and "not executed" in error.text
+    prepared = json.loads(error.text.split("\n", 1)[1])
+    assert prepared["truncated"] and len(prepared["preview"]) <= 2000
+    details = json.loads(Path(prepared["output_path"]).read_text())
+    assert details["input_schema"]["properties"]["label"]["description"].endswith(
+        "END OF PARAMETER"
+    )
+    assert received_requests(mcp_project, "tools/call") == []
+
+
+async def test_mcp_unknown_batch_name_returns_error_instead_of_partial_catalog(mcp_project):
+    model = ScriptedModel(responses=[
+        call("list_mcp_tools", {
+            "server": "local", "tool_names": ["increment", "missing"],
+        }, "unknown"),
+        AIMessage(content="Checked"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=mcp_project / ".mcp.json") as harness:
+        await consume(harness, "Find the requested tools")
+    result = next(m for m in model.seen[-1] if isinstance(m, ToolMessage))
+    assert result.status == "error" and "missing" in result.text
+
+
+async def test_mcp_catalog_cache_is_separate_for_each_server(mcp_project):
+    other = mcp_project / "other"
+    other.mkdir()
+    source = (mcp_project / "server.py").read_text()
+    (other / "server.py").write_text(
+        source.replace("increment(label: str)", "increment(label: int)")
+    )
+    config_path = mcp_project / ".mcp.json"
+    config = json.loads(config_path.read_text())
+    config["mcpServers"]["other"] = {
+        "command": sys.executable, "args": ["server.py"], "cwd": "other",
+        "env": {"TEST_MCP_ROOT": str(other)},
+    }
+    config_path.write_text(json.dumps(config))
+    model = ScriptedModel(responses=[
+        *[call("list_mcp_tools", {"server": server, "tool_names": ["increment"]}, server)
+          for server in ("local", "other")],
+        mcp_call("local-effect"),
+        call("call_mcp_tool", {
+            "server": "other", "tool_name": "increment", "arguments": {"label": 7},
+        }, "other-effect"),
+        AIMessage(content="Both called"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=config_path, full_access=True) as harness:
+        await consume(harness, "Discover and call both servers")
+    results = {m.tool_call_id: m for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    for server, parameter_type in (("local", "string"), ("other", "integer")):
+        schema = json.loads(json.loads(results[server].text)["output"])[0]["input_schema"]
+        assert schema["properties"]["label"]["type"] == parameter_type
+        assert results[f"{server}-effect"].status == "success"
+    assert len(received_requests(mcp_project, "tools/list")) == 1
+    assert len(received_requests(other, "tools/list")) == 1
+
+
+async def test_mcp_reopened_session_fetches_new_schema(mcp_project):
+    directory = mcp_project / "session"
+    config_path = mcp_project / ".mcp.json"
+    model = ScriptedModel(responses=[
+        call("list_mcp_tools", {"server": "local", "tool_names": ["increment"]}, "before"),
+        AIMessage(content="Saved"),
+    ])
+    async with Harness.open(mcp_project, directory, model, mcp_config=config_path) as harness:
+        await consume(harness, "Inspect the current schema")
+    source = mcp_project / "server.py"
+    source.write_text(source.read_text().replace("increment(label: str)", "increment(label: int)"))
+    model = ScriptedModel(responses=[
+        call("list_mcp_tools", {"server": "local", "tool_names": ["increment"]}, "after"),
+        call("call_mcp_tool", {
+            "server": "local", "tool_name": "increment", "arguments": {"label": 7},
+        }, "effect"),
+        AIMessage(content="Resumed"),
+    ])
+    async with Harness.open(mcp_project, directory, model, mcp_config=config_path,
+                            full_access=True) as harness:
+        await consume(harness, "Continue with the updated server")
+    results = {m.tool_call_id: m for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    schema = json.loads(json.loads(results["after"].text)["output"])[0]["input_schema"]
+    assert schema["properties"]["label"]["type"] == "integer"
+    assert results["effect"].status == "success"
+    assert len(received_requests(mcp_project, "tools/list")) == 2
+
+
 @pytest.mark.parametrize("sandbox", [False, True])
 async def test_mcp_discovers_schemas_keeps_session_and_cleans_up(mcp_project, monkeypatch, sandbox):
     if sandbox:
@@ -103,7 +288,7 @@ async def test_mcp_discovers_schemas_keeps_session_and_cleans_up(mcp_project, mo
     monkeypatch.setenv("OPENAI_API_KEY", "test-value-must-not-reach-mcp")
     model = ScriptedModel(responses=[
         call("list_mcp_tools", {}, "servers"),
-        call("list_mcp_tools", {"server": "local", "tool_name": "increment"}, "catalog"),
+        call("list_mcp_tools", {"server": "local", "tool_names": ["increment"]}, "catalog"),
         mcp_call("first"), mcp_call("second"), AIMessage(content="Done"),
     ])
     async with Harness.open(mcp_project, mcp_project / "session", model,
@@ -157,6 +342,8 @@ async def test_mcp_error_returns_to_model(mcp_project):
         assert await consume(harness, "Handle the failing tool") == "Handled"
     result = next(m for m in model.seen[-1] if isinstance(m, ToolMessage))
     assert result.status == "error" and "MCP fixture failure" in result.text
+    assert "input_schema" not in result.text and "not executed" not in result.text
+    assert len(received_requests(mcp_project, "tools/call")) == 1
 
 
 async def test_incomplete_mcp_call_is_reported_without_crashing_cli(mcp_project, capfd):
@@ -205,6 +392,26 @@ async def test_mcp_catalog_does_not_require_approval(mcp_project):
     assert result.status == "success" and "increment" in result.text
 
 
+async def test_mcp_catalog_stays_small_and_full_schema_is_available_on_demand(mcp_project):
+    model = ScriptedModel(responses=[
+        call("list_mcp_tools", {"server": "local"}, "catalog"),
+        call("list_mcp_tools", {"server": "local", "tool_names": ["verbose"]}, "schema"),
+        AIMessage(content="Discovered"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=mcp_project / ".mcp.json") as harness:
+        await consume(harness, "Discover the server's tools")
+    results = {m.tool_call_id: json.loads(m.text)
+               for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    catalog = json.loads(results["catalog"]["output"])
+    assert {item["name"] for item in catalog} >= {"increment", "visual", "verbose"}
+    assert all("input_schema" not in item for item in catalog)
+    schema = json.loads(Path(results["schema"]["output_path"]).read_text())[0]
+    assert schema["name"] == "verbose"
+    assert schema["description"].endswith("END OF INSTRUCTIONS")
+    assert schema["input_schema"]["required"] == ["label"]
+
+
 async def test_child_reuses_parent_mcp_and_leaves_connection_open(mcp_project):
     def reply(child, messages):
         label = "child" if child else (
@@ -229,8 +436,6 @@ async def test_child_reuses_parent_mcp_and_leaves_connection_open(mcp_project):
 
 
 async def test_mcp_large_text_and_images_are_saved_as_artifacts(mcp_project):
-    from pathlib import Path
-
     model = ScriptedModel(responses=[
         *[call("call_mcp_tool", {
             "server": "local", "tool_name": "payload", "arguments": {"kind": kind},
@@ -248,6 +453,42 @@ async def test_mcp_large_text_and_images_are_saved_as_artifacts(mcp_project):
         image = next(harness.session.artifacts.glob("*.png"))
         assert image.read_bytes() == b"image-fixture"
         assert str(image) in results["image"]["output"]
+        assert not any(isinstance(m, HumanMessage) and isinstance(m.content, list)
+                       for m in model.seen[-1])
+
+
+@pytest.mark.parametrize("long_text", [False, True])
+async def test_mcp_inline_images_reach_model_without_losing_text_or_data(mcp_project, long_text):
+    from mini_harness.tools.images import read_image
+
+    model = ScriptedModel(responses=[
+        call("call_mcp_tool", {
+            "server": "local", "tool_name": "visual", "arguments": {"long_text": long_text},
+            "include_images": True,
+        }, "screenshot"),
+        AIMessage(content="Observed"),
+    ])
+    async with Harness.open(mcp_project, mcp_project / "session", model,
+                            mcp_config=mcp_project / ".mcp.json",
+                            full_access=True) as harness:
+        await consume(harness, "Inspect the screenshot")
+        messages = model.seen[-1]
+        images = [block for message in messages
+                  if isinstance(message, HumanMessage) and isinstance(message.content, list)
+                  for block in message.content if block.get("type") == "image"]
+        assert len(images) == 1
+        assert images[0]["mime_type"] == "image/png"
+        assert base64.b64decode(images[0]["base64"]) == PNG
+        result = next(m for m in messages if isinstance(m, ToolMessage))
+        assert result.status == "success"
+        prepared = json.loads(result.text)
+        output = Path(prepared["output_path"]).read_text() if long_text else prepared["output"]
+        assert "Screenshot ready" + ("x" * 20000 if long_text else "") in output
+        assert json.loads(output)["structured_content"] == {"width": 1}
+        saved = next(harness.session.artifacts.glob("*.png"))
+        assert saved.read_bytes() == PNG and str(saved) in output
+        read_image(harness.session, str(saved))
+        assert list(harness.session.artifacts.glob("*.png")) == [saved]
 
 
 async def test_streamable_http_uses_the_same_tool_interface(mcp_project):
